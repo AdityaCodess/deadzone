@@ -1,0 +1,134 @@
+import * as THREE from 'three';
+
+export class WeaponManager {
+  constructor(scene, camera, playerModel) {
+    this.scene = scene;
+    this.camera = camera;
+    this.playerModel = playerModel;
+    
+    this.currentWeaponName = 'Pistol';
+    this.weaponMesh = null;
+    
+    this.isReloading = false;
+    this.reloadTimer = 0;
+    this.reloadDuration = 1.0;
+
+    this.baseQuaternion = new THREE.Quaternion();
+    this.reloadQuaternion = new THREE.Quaternion();
+
+    this.weaponConfigs = {
+      'Pistol': {
+        meshName: 'Pistol',
+        maxAmmo: 12,
+        currentAmmo: 12,
+        muzzleOffset: new THREE.Vector3(0, 0.1, 0.5)
+      },
+      'Rifle': {
+        meshName: 'Rifle',
+        maxAmmo: 30,
+        currentAmmo: 30,
+        muzzleOffset: new THREE.Vector3(0, 0.1, 0.8)
+      }
+    };
+
+    this.currentConfig = this.weaponConfigs['Pistol'];
+    this.raycaster = new THREE.Raycaster();
+    this.center = new THREE.Vector2(0, 0);
+
+    this.updateReferences();
+  }
+
+  updateReferences() {
+    if (this.playerModel && !this.weaponMesh) {
+      this.weaponMesh = this.playerModel.getObjectByName(this.currentConfig.meshName);
+      if (this.weaponMesh) {
+        this.baseQuaternion.copy(this.weaponMesh.quaternion);
+        // Clean rotational dip offset for reloading
+        const dipQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.7);
+        this.reloadQuaternion.copy(this.baseQuaternion).multiply(dipQuat);
+      }
+    }
+  }
+
+  getMuzzlePosition() {
+    this.updateReferences();
+    if (this.weaponMesh) {
+      return this.weaponMesh.localToWorld(this.currentConfig.muzzleOffset.clone());
+    }
+    return this.camera.position.clone().add(new THREE.Vector3(0, 0, -0.5));
+  }
+
+  shoot(sceneObjects) {
+    if (this.isReloading) return null;
+    if (this.currentConfig.currentAmmo <= 0) {
+      console.log("Click! Out of ammo. Press R to reload.");
+      return null;
+    }
+
+    this.currentConfig.currentAmmo--;
+
+    // Recoil FOV punch
+    this.camera.fov = 73;
+    this.camera.updateProjectionMatrix();
+    setTimeout(() => {
+      this.camera.fov = 75;
+      this.camera.updateProjectionMatrix();
+    }, 50);
+
+    this.raycaster.setFromCamera(this.center, this.camera);
+    const intersects = this.raycaster.intersectObjects(sceneObjects, true);
+    
+    const validHit = intersects.find(hit => {
+      if (!this.playerModel) return true;
+      let isSelf = false;
+      hit.object.traverseAncestors((ancestor) => {
+        if (ancestor === this.playerModel) isSelf = true;
+      });
+      return !isSelf && hit.object !== this.playerModel;
+    });
+
+    const muzzleOrigin = this.getMuzzlePosition();
+    const endPoint = validHit ? validHit.point : muzzleOrigin.clone().add(this.raycaster.ray.direction.clone().multiplyScalar(50));
+
+    const tracerGeo = new THREE.BufferGeometry().setFromPoints([muzzleOrigin, endPoint]);
+    const tracerMat = new THREE.LineBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.9 });
+    const tracerLine = new THREE.Line(tracerGeo, tracerMat);
+    this.scene.add(tracerLine);
+    
+    setTimeout(() => {
+      this.scene.remove(tracerLine);
+      tracerGeo.dispose();
+      tracerMat.dispose();
+    }, 45);
+
+    return validHit || null;
+  }
+
+  reload() {
+    if (this.isReloading || this.currentConfig.currentAmmo >= this.currentConfig.maxAmmo) return;
+    this.isReloading = true;
+    this.reloadTimer = 0;
+    console.log(`Reloading ${this.currentWeaponName}...`);
+  }
+
+  update(delta) {
+    this.updateReferences();
+    if (!this.weaponMesh) return;
+
+    if (this.isReloading) {
+      this.reloadTimer += delta;
+      const progress = Math.min(this.reloadTimer / this.reloadDuration, 1.0);
+
+      // Smooth quaternion slerp for the reload dip
+      const factor = Math.sin(progress * Math.PI);
+      this.weaponMesh.quaternion.slerpQuaternions(this.baseQuaternion, this.reloadQuaternion, factor);
+
+      if (progress >= 1.0) {
+        this.currentConfig.currentAmmo = this.currentConfig.maxAmmo;
+        this.isReloading = false;
+        this.weaponMesh.quaternion.copy(this.baseQuaternion);
+        console.log("Reload complete!");
+      }
+    }
+  }
+}
