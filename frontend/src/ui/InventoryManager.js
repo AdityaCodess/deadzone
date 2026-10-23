@@ -208,7 +208,11 @@ export class InventoryManager {
         const temp = this.items[this.activeHotbarIndex];
         this.items[this.activeHotbarIndex] = this.items[index];
         this.items[index] = temp;
-        this.equipHotbar(this.activeHotbarIndex);
+        
+        // BUFFER FIX: Let event bubble safely before nuking DOM
+        setTimeout(() => {
+          this.equipHotbar(this.activeHotbarIndex);
+        }, 10);
       });
 
       slot.addEventListener('mouseenter', () => { if(item) slot.style.transform = 'scale(1.05)'; });
@@ -218,6 +222,7 @@ export class InventoryManager {
         e.dataTransfer.setData('text/plain', index);
         setTimeout(() => slot.style.opacity = '0.5', 0);
       });
+      
       slot.addEventListener('dragend', () => slot.style.opacity = '1');
       slot.addEventListener('dragover', (e) => e.preventDefault());
       
@@ -231,11 +236,15 @@ export class InventoryManager {
           this.items[fromIndex] = this.items[toIndex];
           this.items[toIndex] = temp;
           
-          if (fromIndex === this.activeHotbarIndex || toIndex === this.activeHotbarIndex) {
-            this.equipHotbar(this.activeHotbarIndex);
-          } else {
-            this.render();
-          }
+          // CRITICAL HTML5 DRAG BUG FIX: 
+          // Wait 50ms for browser to completely finish drag events before nuking DOM
+          setTimeout(() => {
+            if (fromIndex === this.activeHotbarIndex || toIndex === this.activeHotbarIndex) {
+              this.equipHotbar(this.activeHotbarIndex);
+            } else {
+              this.render();
+            }
+          }, 50); 
         }
       });
 
@@ -267,9 +276,7 @@ export class InventoryManager {
     if (index >= 0 && index < 5) {
       this.activeHotbarIndex = index;
       this.render(); 
-      if (this.items[index]) {
-        this.onEquip(this.items[index]);
-      }
+      this.onEquip(this.items[index] || null); 
     }
   }
 }

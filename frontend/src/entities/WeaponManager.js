@@ -22,7 +22,6 @@ export class WeaponManager {
       'Shotgun':{ meshName: 'Shotgun', muzzleOffset: new THREE.Vector3(0, 0.1, 0.7) }
     };
 
-    // FOOLPROOF AMMO INITIALIZATION
     this.ammoState = {};
     for (const [weaponName, config] of Object.entries(this.serverWeapons)) {
       this.ammoState[weaponName] = config.maxAmmo;
@@ -35,10 +34,16 @@ export class WeaponManager {
 
   switchWeapon(weaponName) {
     if (this.isReloading || this.currentWeaponName === weaponName) return;
-    if (!this.serverWeapons[weaponName]) return;
 
     if (this.weaponMesh) {
       this.weaponMesh.visible = false;
+    }
+
+    // Unarm player if slot is empty
+    if (!weaponName || !this.serverWeapons[weaponName]) {
+       this.currentWeaponName = null;
+       this.weaponMesh = null;
+       return;
     }
 
     this.currentWeaponName = weaponName;
@@ -51,7 +56,7 @@ export class WeaponManager {
   }
 
   updateReferences() {
-    if (this.playerModel && !this.weaponMesh) {
+    if (this.playerModel && !this.weaponMesh && this.currentWeaponName) {
       this.weaponMesh = this.playerModel.getObjectByName(this.visualConfigs[this.currentWeaponName].meshName);
       if (this.weaponMesh) {
         this.baseQuaternion.copy(this.weaponMesh.quaternion);
@@ -68,7 +73,7 @@ export class WeaponManager {
   }
 
   shoot(sceneObjects) {
-    if (this.isReloading) return null;
+    if (this.isReloading || !this.currentWeaponName) return null;
     
     const config = this.serverWeapons[this.currentWeaponName];
     const now = performance.now();
@@ -77,9 +82,8 @@ export class WeaponManager {
       return null; 
     }
 
-    // STRICT AMMO CHECK
     if (this.ammoState[this.currentWeaponName] <= 0) {
-      return null; // Don't fire, don't spawn tracers
+      return null;
     }
 
     this.ammoState[this.currentWeaponName]--;
@@ -137,6 +141,7 @@ export class WeaponManager {
   }
 
   reload() {
+    if (!this.currentWeaponName) return;
     const maxAmmo = this.serverWeapons[this.currentWeaponName].maxAmmo;
     if (this.isReloading || this.ammoState[this.currentWeaponName] >= maxAmmo) return;
     
@@ -163,7 +168,7 @@ export class WeaponManager {
   update(delta) {
     this.updateReferences();
 
-    if (this.isReloading) {
+    if (this.isReloading && this.currentWeaponName) {
       this.reloadTimer += delta;
       
       const reloadDuration = this.serverWeapons[this.currentWeaponName].reloadTime;

@@ -6,13 +6,15 @@ import { InventoryManager } from '../ui/InventoryManager.js';
 import { InteractionManager } from '../systems/InteractionManager.js';
 
 export class Player {
-  constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory) {
+  // Added worldGenerator to constructor
+  constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory, worldGenerator) {
     this.scene = scene;
     this.camera = camera;
     this.canvas = canvas;
     this.zombieManager = zombieManager;
     this.weaponConfig = weaponConfig;
-    
+    this.worldGenerator = worldGenerator;
+   
     this.controls = new PointerLockControls(this.camera, this.canvas);
     this.controls.maxPolarAngle = Math.PI - 0.6;
     
@@ -20,7 +22,21 @@ export class Player {
     this.velocity = new THREE.Vector3();
     this.direction = new THREE.Vector3();
     
-    this.speed = playerConfig.baseSpeed;
+    this.baseSpeed = playerConfig.baseSpeed;
+    this.sprintMultiplier = playerConfig.sprintMultiplier;
+    this.gravity = playerConfig.gravity;
+    this.jumpForce = playerConfig.jumpForce;
+    
+    this.maxStamina = playerConfig.maxStamina || 100;
+    this.stamina = this.maxStamina;
+    this.staminaDrain = playerConfig.staminaDrain || 25.0;
+    this.staminaRegen = playerConfig.staminaRegen || 6.0;
+    this.jumpCost = playerConfig.jumpCost || 20.0;
+    
+    this.canJump = true;
+    this.isSprintingInput = false; 
+    this.isExhausted = false; 
+    
     this.maxHealth = playerConfig.maxHealth;
     this.health = this.maxHealth;
     
@@ -39,19 +55,26 @@ export class Player {
         if (this.weaponManager) this.weaponManager.switchWeapon(weaponName);
       },
       (shouldLock) => {
-        if (shouldLock && !this.isDead) this.controls.lock();
-        else this.controls.unlock();
+        if (shouldLock && !this.isDead) {
+          this.canvas.focus(); 
+          this.controls.lock();
+        } else {
+          this.controls.unlock();
+        }
       }
     );
 
     this.interactionManager = new InteractionManager(this.scene, this.camera, this.inventoryManager);
 
-    this._buildAmmoUI();
+    this._buildHUD();
     this._bindEvents();
   }
 
-  _buildAmmoUI() {
+  _buildHUD() {
+    document.querySelectorAll('#ammo-hud, #health-hud').forEach(el => el.remove());
+
     this.ammoContainer = document.createElement('div');
+    this.ammoContainer.id = 'ammo-hud';
     this.ammoContainer.style.cssText = `
       position: fixed; bottom: 30px; right: 30px;
       background: rgba(43, 39, 38, 0.9); border: 2px solid #5a5654;
@@ -61,6 +84,45 @@ export class Player {
       display: flex; align-items: baseline; gap: 10px; pointer-events: none;
     `;
     document.body.appendChild(this.ammoContainer);
+
+    this.healthContainer = document.createElement('div');
+    this.healthContainer.id = 'health-hud';
+    this.healthContainer.style.cssText = `
+      position: fixed; bottom: 30px; left: 30px;
+      background: rgba(43, 39, 38, 0.9); border: 2px solid #5a5654;
+      padding: 10px 20px; border-radius: 8px; z-index: 100;
+      color: #fff; font-family: monospace; font-weight: bold;
+      box-shadow: inset 0 0 10px rgba(0,0,0,0.8), 0 4px 6px rgba(0,0,0,0.5); 
+      display: flex; flex-direction: column; gap: 6px; pointer-events: none; width: 220px;
+    `;
+    
+    this.healthText = document.createElement('div');
+    this.healthText.style.cssText = `font-size: 1.2rem; display: flex; justify-content: space-between; align-items: baseline;`;
+    
+    this.healthBarBg = document.createElement('div');
+    this.healthBarBg.style.cssText = `width: 100%; height: 14px; background: #1a1818; border-radius: 4px; border: 1px solid #000; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);`;
+    
+    this.healthBarFill = document.createElement('div');
+    this.healthBarFill.style.cssText = `width: 100%; height: 100%; background: #33cc33; transition: width 0.2s ease-out, background-color 0.3s;`;
+    this.healthBarBg.appendChild(this.healthBarFill);
+    
+    this.staminaText = document.createElement('div');
+    this.staminaText.style.cssText = `font-size: 0.85rem; color: #aaa; margin-top: 4px; display: flex; justify-content: space-between;`;
+    this.staminaText.innerText = 'STAMINA';
+
+    this.staminaBarBg = document.createElement('div');
+    this.staminaBarBg.style.cssText = `width: 100%; height: 8px; background: #1a1818; border-radius: 4px; border: 1px solid #000; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);`;
+    
+    this.staminaBarFill = document.createElement('div');
+    this.staminaBarFill.style.cssText = `width: 100%; height: 100%; background: #00aaff; transition: width 0.1s linear, background-color 0.3s;`;
+    this.staminaBarBg.appendChild(this.staminaBarFill);
+
+    this.healthContainer.appendChild(this.healthText);
+    this.healthContainer.appendChild(this.healthBarBg);
+    this.healthContainer.appendChild(this.staminaText);
+    this.healthContainer.appendChild(this.staminaBarBg);
+    
+    document.body.appendChild(this.healthContainer);
   }
 
   async loadModel() {
@@ -104,6 +166,7 @@ export class Player {
   _bindEvents() {
     this.controls.addEventListener('unlock', () => {
       this.isShooting = false;
+      this.isSprintingInput = false;
       this.moveState = { forward: false, backward: false, left: false, right: false };
     });
 
@@ -121,6 +184,7 @@ export class Player {
 
       if (e.code === 'Tab') {
         e.preventDefault();
+        this.canvas.focus(); 
         this.inventoryManager.toggle();
         return;
       }
@@ -131,6 +195,18 @@ export class Player {
 
       if (e.code === 'KeyR' && this.weaponManager) {
         this.weaponManager.reload();
+      }
+
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        this.isSprintingInput = true;
+      }
+      
+      if (e.code === 'Space' && this.canJump && this.controls.isLocked && !this.inventoryManager.isOpen) {
+        if (this.stamina >= this.jumpCost && !this.isExhausted) {
+          this.velocity.y += this.jumpForce;
+          this.stamina -= this.jumpCost;
+          this.canJump = false;
+        }
       }
       
       if (this.weaponManager && !this.inventoryManager.isOpen) {
@@ -143,7 +219,12 @@ export class Player {
       this._onKeyChange(e.code, true);
     });
 
-    document.addEventListener('keyup', (e) => this._onKeyChange(e.code, false));
+    document.addEventListener('keyup', (e) => {
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        this.isSprintingInput = false;
+      }
+      this._onKeyChange(e.code, false);
+    });
     
     document.addEventListener('mousedown', (e) => {
       if (this.controls.isLocked && e.button === 0 && !this.isDead && !this.inventoryManager.isOpen) {
@@ -170,7 +251,7 @@ export class Player {
   }
 
   _shoot() {
-    if (!this.weaponManager) return;
+    if (!this.weaponManager || !this.weaponManager.currentWeaponName) return;
     const shotResults = this.weaponManager.shoot(this.scene.children);
 
     if (shotResults) {
@@ -274,89 +355,195 @@ export class Player {
     }
   }
 
+  // Added AABB Collision Test Method
+  _checkWallCollision() {
+    if (!this.worldGenerator || !this.worldGenerator.colliders) return false;
+    const radius = 0.4;
+    const height = 1.6;
+    
+    const playerBox = new THREE.Box3(
+      new THREE.Vector3(this.camera.position.x - radius, this.camera.position.y - height, this.camera.position.z - radius),
+      new THREE.Vector3(this.camera.position.x + radius, this.camera.position.y + 0.2, this.camera.position.z + radius)
+    );
+
+    for (const box of this.worldGenerator.colliders) {
+      if (playerBox.intersectsBox(box)) return true;
+    }
+    return false;
+  }
+
   update(delta) {
     if (this.mixer) this.mixer.update(delta);
 
     if (this.isShooting && this.weaponManager && this.controls.isLocked) {
-      const activeWeapon = this.weaponManager.currentWeaponName;
-      if (this.weaponConfig[activeWeapon].automatic) {
+      if (this.weaponManager.currentWeaponName && this.weaponConfig[this.weaponManager.currentWeaponName].automatic) {
         this._shoot();
       }
     }
+    
+    let isPhysicallySprinting = false;
+    let currentSpeed = this.baseSpeed;
 
-    if (this.model && this.controls.isLocked && !this.inventoryManager.isOpen) {
+    if (this.controls.isLocked && !this.isDead && !this.inventoryManager.isOpen) {
+      const isMovingForward = this.moveState.forward;
+      
+      if (this.stamina <= 0) {
+        this.isExhausted = true;
+      } else if (this.stamina >= this.maxStamina * 0.25) {
+        this.isExhausted = false; 
+      }
+      
+      if (this.isSprintingInput && isMovingForward && !this.isExhausted) {
+        isPhysicallySprinting = true;
+        currentSpeed = this.baseSpeed * this.sprintMultiplier;
+        this.stamina -= this.staminaDrain * delta;
+        if (this.stamina < 0) this.stamina = 0;
+      } else {
+        if (this.stamina < this.maxStamina) {
+          this.stamina += this.staminaRegen * delta;
+          if (this.stamina > this.maxStamina) this.stamina = this.maxStamina;
+        }
+      }
+    }
+
+    if (this.model && !this.isDead) {
       this.model.position.copy(this.camera.position);
       this.model.position.y -= 1.6;
 
-      const camDir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-      camDir.y = 0;
-      camDir.normalize();
-      
-      this.model.position.sub(camDir.multiplyScalar(0.28));
-
       const euler = new THREE.Euler().setFromQuaternion(this.camera.quaternion, 'YXZ');
       this.model.rotation.y = euler.y + Math.PI;
+
+      this.model.position.x += Math.sin(euler.y) * 0.28;
+      this.model.position.z += Math.cos(euler.y) * 0.28;
 
       const armBone = this.model.getObjectByName('LowerArmL') || this.model.getObjectByName('HandL');
       if (armBone) {
         armBone.rotation.x = euler.x; 
       }
 
-      if (!this.isDead) {
-        const isMoving = this.moveState.forward || this.moveState.backward || this.moveState.left || this.moveState.right;
-        const targetAction = isMoving ? 'Run_Gun' : 'Idle_Gun';
+      const isMoving = (this.moveState.forward || this.moveState.backward || this.moveState.left || this.moveState.right) && this.controls.isLocked && !this.inventoryManager.isOpen;
+      let targetAction = 'Idle_Gun';
 
-        if (this.currentAction !== targetAction) {
-          const prev = this.actions[this.currentAction];
-          const next = this.actions[targetAction];
-          if (prev && next) {
-            next.reset().fadeIn(0.2);
-            prev.fadeOut(0.2);
-            next.play();
-          }
-          this.currentAction = targetAction;
+      if (!this.canJump) {
+        targetAction = this.actions['Jump_Gun'] ? 'Jump_Gun' : (this.actions['Jump'] ? 'Jump' : 'Idle_Gun');
+      } else if (isMoving) {
+        if (isPhysicallySprinting) {
+          targetAction = this.actions['Sprint_Gun'] ? 'Sprint_Gun' : 'Run_Gun';
+        } else {
+          targetAction = 'Run_Gun';
         }
+      }
+
+      if (this.currentAction !== targetAction) {
+        const prev = this.actions[this.currentAction];
+        const next = this.actions[targetAction];
+        if (prev && next) {
+          next.reset().fadeIn(0.2);
+          prev.fadeOut(0.2);
+          next.play();
+        }
+        this.currentAction = targetAction;
       }
     }
     
     if (this.weaponManager) {
         this.weaponManager.update(delta);
 
-        // UPDATE AMMO UI
         if (this.ammoContainer) {
           const wName = this.weaponManager.currentWeaponName;
-          const current = this.weaponManager.ammoState[wName];
-          const max = this.weaponManager.serverWeapons[wName].maxAmmo;
-          const isReloading = this.weaponManager.isReloading;
-          
-          if (isReloading) {
-            this.ammoContainer.innerHTML = `<span style="color: #ffaa00; font-size: 1.4rem;">RELOADING...</span>`;
+          if (wName) {
+            const current = this.weaponManager.ammoState[wName];
+            const max = this.weaponManager.serverWeapons[wName].maxAmmo;
+            const isReloading = this.weaponManager.isReloading;
+            
+            if (isReloading) {
+              this.ammoContainer.innerHTML = `<span style="color: #ffaa00; font-size: 1.4rem;">RELOADING...</span>`;
+            } else {
+              const color = current <= (max * 0.25) ? '#ff4444' : '#ffffff';
+              this.ammoContainer.innerHTML = `
+                <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
+                <span style="color: ${color}; font-size: 2.2rem;">${current}</span> 
+                <span style="color: #666; font-size: 1.2rem;">/ ${max}</span>
+              `;
+            }
           } else {
-            const color = current <= (max * 0.25) ? '#ff4444' : '#ffffff';
-            this.ammoContainer.innerHTML = `
-              <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
-              <span style="color: ${color}; font-size: 2.2rem;">${current}</span> 
-              <span style="color: #666; font-size: 1.2rem;">/ ${max}</span>
-            `;
+            this.ammoContainer.innerHTML = `<span style="color: #aaa; font-size: 1.4rem;">UNARMED</span>`;
           }
         }
     }
 
-    if (this.controls.isLocked && !this.isDead && !this.inventoryManager.isOpen) {
+    if (this.healthContainer) {
+      const currentHealth = Math.ceil(Math.max(0, this.health));
+      const hpPercent = (currentHealth / this.maxHealth) * 100;
+      
+      this.healthText.innerHTML = `
+        <span style="color: #aaa;">HEALTH</span>
+        <span style="font-size: 1.8rem; color: ${this.health <= 0 ? '#ff4444' : '#fff'};">${currentHealth}</span>
+      `;
+      
+      this.healthBarFill.style.width = `${hpPercent}%`;
+      
+      if (hpPercent > 50) this.healthBarFill.style.backgroundColor = '#33cc33';
+      else if (hpPercent > 25) this.healthBarFill.style.backgroundColor = '#ffaa00';
+      else this.healthBarFill.style.backgroundColor = '#ff4444';
+      
+      const stamPercent = (this.stamina / this.maxStamina) * 100;
+      this.staminaBarFill.style.width = `${stamPercent}%`;
+      
+      if (this.isExhausted) {
+        this.staminaBarFill.style.backgroundColor = '#888888'; 
+      } else {
+        this.staminaBarFill.style.backgroundColor = stamPercent < 25 ? '#ff4444' : '#00aaff';
+      }
+
+      if (this.isDead) {
+        this.healthText.innerHTML = `<span style="color: #ff4444; width: 100%; text-align: center; font-size: 1.5rem;">YOU ARE DEAD [R]</span>`;
+      }
+    }
+
+    if (!this.isDead) {
+      this.velocity.y -= this.gravity * delta;
+      
       this.velocity.x -= this.velocity.x * 10.0 * delta;
       this.velocity.z -= this.velocity.z * 10.0 * delta;
 
-      this.direction.z = Number(this.moveState.forward) - Number(this.moveState.backward);
-      this.direction.x = Number(this.moveState.right) - Number(this.moveState.left);
-      this.direction.normalize();
+      if (this.controls.isLocked && !this.inventoryManager.isOpen) {
+        this.direction.z = Number(this.moveState.forward) - Number(this.moveState.backward);
+        this.direction.x = Number(this.moveState.right) - Number(this.moveState.left);
+        this.direction.normalize();
 
-      if (this.moveState.forward || this.moveState.backward) this.velocity.z -= this.direction.z * this.speed * delta;
-      if (this.moveState.left || this.moveState.right) this.velocity.x -= this.direction.x * this.speed * delta;
+        if (this.moveState.forward || this.moveState.backward) this.velocity.z -= this.direction.z * currentSpeed * delta;
+        if (this.moveState.left || this.moveState.right) this.velocity.x -= this.direction.x * currentSpeed * delta;
+      }
+
+      // Added Sliding Collision Logic
+      const startX = this.camera.position.x;
+      const startZ = this.camera.position.z;
 
       this.controls.moveRight(-this.velocity.x * delta);
       this.controls.moveForward(-this.velocity.z * delta);
 
-      this.camera.position.y = 1.6;
+      const endX = this.camera.position.x;
+      const endZ = this.camera.position.z;
+
+      this.camera.position.set(endX, this.camera.position.y, startZ);
+      if (this._checkWallCollision()) {
+        this.camera.position.x = startX; 
+      }
+
+      const updatedX = this.camera.position.x; 
+      this.camera.position.set(updatedX, this.camera.position.y, endZ);
+      if (this._checkWallCollision()) {
+        this.camera.position.z = startZ; 
+      }
+      
+      this.camera.position.y += this.velocity.y * delta;
+
+      if (this.camera.position.y < 1.6) {
+        this.camera.position.y = 1.6;
+        this.velocity.y = 0;
+        this.canJump = true;
+      }
     }
 
     if (this.interactionManager) {
