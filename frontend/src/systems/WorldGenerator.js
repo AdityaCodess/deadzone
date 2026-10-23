@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export class WorldGenerator {
-  constructor(scene) {
+  constructor(scene, environmentManager) {
     this.scene = scene;
+    this.environmentManager = environmentManager;
     this.tileSize = 20; 
     this.renderDistance = 80.0; 
     
@@ -19,7 +20,80 @@ export class WorldGenerator {
     
     this.tiles = [];
     this.assets = {};
-    this.colliders = []; // Added collision registry
+    this.colliders = []; 
+
+    this._initLampResources();
+  }
+
+  _initLampResources() {
+    this.poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5.0, 8);
+    this.armGeo = new THREE.BoxGeometry(1.2, 0.08, 0.08);
+    this.bulbGeo = new THREE.BoxGeometry(0.4, 0.1, 0.25);
+
+    this.poleMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+    this.bulbMat = new THREE.MeshStandardMaterial({
+      color: 0xffeedd,
+      emissive: 0xffaa44,
+      emissiveIntensity: 0
+    });
+
+    // Procedural radial gradient texture for the ground light spread
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255, 180, 90, 1.0)');
+    grad.addColorStop(0.5, 'rgba(255, 160, 60, 0.35)');
+    grad.addColorStop(1, 'rgba(255, 140, 40, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 128, 128);
+
+    const glowTex = new THREE.CanvasTexture(canvas);
+    this.glowGeo = new THREE.PlaneGeometry(14, 14);
+    this.glowMat = new THREE.MeshBasicMaterial({
+      map: glowTex,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+  }
+
+  _createStreetLamp(tileContainer, posX, posZ, localX, localZ, armDirX, armDirZ) {
+    const lampGroup = new THREE.Group();
+    lampGroup.position.set(localX, 0, localZ);
+
+    const pole = new THREE.Mesh(this.poleGeo, this.poleMat);
+    pole.position.y = 2.5;
+    lampGroup.add(pole);
+
+    // Overhang arm pointing toward the street
+    const arm = new THREE.Mesh(this.armGeo, this.poleMat);
+    arm.position.set(armDirX * 0.5, 4.9, armDirZ * 0.5);
+    if (armDirZ !== 0) arm.rotation.y = Math.PI / 2;
+    lampGroup.add(arm);
+
+    const bulb = new THREE.Mesh(this.bulbGeo, this.bulbMat);
+    bulb.position.set(armDirX * 1.0, 4.82, armDirZ * 1.0);
+    lampGroup.add(bulb);
+
+    // Soft ground light spread decal right under the bulb
+    const glowPatch = new THREE.Mesh(this.glowGeo, this.glowMat);
+    glowPatch.rotation.x = -Math.PI / 2;
+    glowPatch.position.set(armDirX * 1.5, 0.03, armDirZ * 1.5);
+    lampGroup.add(glowPatch);
+
+    tileContainer.add(lampGroup);
+
+    if (this.environmentManager) {
+      const worldLightPos = new THREE.Vector3(
+        posX + localX + armDirX * 1.2,
+        4.5,
+        posZ + localZ + armDirZ * 1.2
+      );
+      this.environmentManager.registerStreetLamp(worldLightPos, this.bulbMat, this.glowMat);
+    }
   }
 
   async loadAssets() {
@@ -97,6 +171,9 @@ export class WorldGenerator {
         const posZ = (z * this.tileSize) - offsetZ;
         const tileType = this.mapLayout[z][x];
 
+        const tileContainer = new THREE.Group();
+        tileContainer.position.set(posX, 0, posZ);
+
         let mesh = null;
 
         if (tileType === 0) {
@@ -106,14 +183,31 @@ export class WorldGenerator {
           const right = x < cols - 1 ? this.mapLayout[z][x+1] : 0;
           
           const roadConnections = (up === 0 ? 1 : 0) + (down === 0 ? 1 : 0) + (left === 0 ? 1 : 0) + (right === 0 ? 1 : 0);
+          const isHorizontalRoad = (left === 0 || right === 0) && roadConnections < 3;
           
           if (roadConnections >= 3 && this.assets['road_intersection']) {
             mesh = this.assets['road_intersection'].clone();
           } else if (this.assets['road_straight']) {
             mesh = this.assets['road_straight'].clone();
-            if (left === 0 || right === 0) {
+            if (isHorizontalRoad) {
               mesh.rotation.y = Math.PI / 2; 
             }
+          }
+
+          if (mesh) tileContainer.add(mesh);
+
+          // Spawn streetlamps on the sidewalk edge (8.2m from center, overhanging inward toward road)
+          if (roadConnections >= 3) {
+            // Corner lamp at intersections
+            this._createStreetLamp(tileContainer, posX, posZ, 8.2, 8.2, -1, 0);
+          } else if (isHorizontalRoad) {
+            // Road runs East-West -> place lamp on North/South sidewalk (Z = ±8.2) pointing inward
+            const side = ((x + z) % 2 === 0) ? 1 : -1;
+            this._createStreetLamp(tileContainer, posX, posZ, 0, side * 8.2, 0, -side);
+          } else {
+            // Road runs North-South -> place lamp on East/West sidewalk (X = ±8.2) pointing inward
+            const side = ((x + z) % 2 === 0) ? 1 : -1;
+            this._createStreetLamp(tileContainer, posX, posZ, side * 8.2, 0, -side, 0);
           }
         } else if (tileType === 1) {
           mesh = new THREE.Group();
@@ -131,20 +225,19 @@ export class WorldGenerator {
             mesh.add(bldg);
           }
           
-          // Generate an invisible mathematical hit-box matching the 90% building scale
-          const halfSize = (this.tileSize * 0.90) / 2;
-          const collisionBox = new THREE.Box3(
-            new THREE.Vector3(posX - halfSize + 0.2, 0, posZ - halfSize + 0.2), // +0.2 offset prevents snagging on corners
-            new THREE.Vector3(posX + halfSize - 0.2, 50, posZ + halfSize - 0.2)
-          );
-          this.colliders.push(collisionBox);
+          tileContainer.add(mesh);
         }
 
-        if (mesh) {
-          mesh.position.set(posX, 0, posZ);
-          mesh.visible = false; 
-          this.scene.add(mesh);
-          this.tiles.push({ type: tileType === 0 ? 'road' : 'building', mesh: mesh, x: posX, z: posZ });
+        tileContainer.visible = false; 
+        this.scene.add(tileContainer);
+        this.tiles.push({ type: tileType === 0 ? 'road' : 'building', mesh: tileContainer, x: posX, z: posZ });
+
+        if (tileType === 1 && mesh) {
+          tileContainer.updateMatrixWorld(true);
+          const bldgBox = new THREE.Box3().setFromObject(mesh);
+          bldgBox.expandByScalar(-0.6); 
+          bldgBox.max.y = 50; 
+          this.colliders.push(bldgBox);
         }
       }
     }

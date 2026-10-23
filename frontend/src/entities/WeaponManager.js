@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 
 export class WeaponManager {
-  constructor(scene, camera, playerModel, serverWeapons) {
+  constructor(scene, camera, playerModel, serverWeapons, audioManager) {
     this.scene = scene;
     this.camera = camera;
     this.playerModel = playerModel;
     this.serverWeapons = serverWeapons; 
+    this.audioManager = audioManager;
     
     this.currentWeaponName = 'Pistol';
     this.weaponMesh = null;
@@ -32,14 +33,19 @@ export class WeaponManager {
     this.updateReferences();
   }
 
+  stopShooting() {
+    // Left empty for structural compatibility; no audio loops need killing anymore
+  }
+
   switchWeapon(weaponName) {
+    this.stopShooting();
+    
     if (this.isReloading || this.currentWeaponName === weaponName) return;
 
     if (this.weaponMesh) {
       this.weaponMesh.visible = false;
     }
 
-    // Unarm player if slot is empty
     if (!weaponName || !this.serverWeapons[weaponName]) {
        this.currentWeaponName = null;
        this.weaponMesh = null;
@@ -73,7 +79,10 @@ export class WeaponManager {
   }
 
   shoot(sceneObjects) {
-    if (this.isReloading || !this.currentWeaponName) return null;
+    if (this.isReloading || !this.currentWeaponName) {
+      this.stopShooting();
+      return null;
+    }
     
     const config = this.serverWeapons[this.currentWeaponName];
     const now = performance.now();
@@ -83,7 +92,19 @@ export class WeaponManager {
     }
 
     if (this.ammoState[this.currentWeaponName] <= 0) {
+      this.stopShooting();
       return null;
+    }
+
+    if (this.audioManager) {
+      // Explicit routing to guarantee shotgun and pistol logic fires correctly
+      if (this.currentWeaponName === 'Rifle') {
+        this.audioManager.playShot('pistol', 0.6); 
+      } else if (this.currentWeaponName === 'Shotgun') {
+        this.audioManager.playShot('shotgun', 0.8); // Slightly louder for punch
+      } else {
+        this.audioManager.playShot('pistol', 0.6);
+      }
     }
 
     this.ammoState[this.currentWeaponName]--;
@@ -141,6 +162,8 @@ export class WeaponManager {
   }
 
   reload() {
+    this.stopShooting();
+    
     if (!this.currentWeaponName) return;
     const maxAmmo = this.serverWeapons[this.currentWeaponName].maxAmmo;
     if (this.isReloading || this.ammoState[this.currentWeaponName] >= maxAmmo) return;

@@ -2,10 +2,11 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 export class ZombieManager {
-  constructor(scene, playerCamera, serverZombies) {
+  constructor(scene, playerCamera, serverZombies, audioManager) {
     this.scene = scene;
     this.playerCamera = playerCamera;
     this.serverZombies = serverZombies;
+    this.audioManager = audioManager;
     this.zombies = [];
     this.mixers = [];
   }
@@ -65,6 +66,7 @@ export class ZombieManager {
 
   killZombie(zombie) {
     zombie.userData.state = 'dead';
+    if (this.audioManager) this.audioManager.playShot('zombie_death', 0.8);
 
     zombie.traverse((child) => {
       if (child.isMesh) {
@@ -140,6 +142,7 @@ export class ZombieManager {
 
           if (player && !player.isDead) {
             if (!zombie.userData.lastAttackTime || performance.now() - zombie.userData.lastAttackTime > config.attackCooldown) {
+              if (this.audioManager) this.audioManager.playShot('zombie', 0.5);
               player.takeDamage(config.damage);
               zombie.userData.lastAttackTime = performance.now();
             }

@@ -6,14 +6,14 @@ import { InventoryManager } from '../ui/InventoryManager.js';
 import { InteractionManager } from '../systems/InteractionManager.js';
 
 export class Player {
-  // Added worldGenerator to constructor
-  constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory, worldGenerator) {
+  constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory, worldGenerator, audioManager) {
     this.scene = scene;
     this.camera = camera;
     this.canvas = canvas;
     this.zombieManager = zombieManager;
     this.weaponConfig = weaponConfig;
     this.worldGenerator = worldGenerator;
+    this.audioManager = audioManager;
    
     this.controls = new PointerLockControls(this.camera, this.canvas);
     this.controls.maxPolarAngle = Math.PI - 0.6;
@@ -143,7 +143,7 @@ export class Player {
           this.actions[clip.name] = this.mixer.clipAction(clip);
         });
 
-        this.weaponManager = new WeaponManager(this.scene, this.camera, this.model, this.weaponConfig);
+        this.weaponManager = new WeaponManager(this.scene, this.camera, this.model, this.weaponConfig, this.audioManager);
 
         const activeItem = this.inventoryManager.items[this.inventoryManager.activeHotbarIndex];
         if (activeItem) this.weaponManager.switchWeapon(activeItem);
@@ -355,7 +355,6 @@ export class Player {
     }
   }
 
-  // Added AABB Collision Test Method
   _checkWallCollision() {
     if (!this.worldGenerator || !this.worldGenerator.colliders) return false;
     const radius = 0.4;
@@ -516,7 +515,6 @@ export class Player {
         if (this.moveState.left || this.moveState.right) this.velocity.x -= this.direction.x * currentSpeed * delta;
       }
 
-      // Added Sliding Collision Logic
       const startX = this.camera.position.x;
       const startZ = this.camera.position.z;
 
