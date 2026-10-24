@@ -1,7 +1,8 @@
 export class InventoryManager {
-  constructor(startingItems, onEquip, onToggleLock) {
+  constructor(startingItems, itemIcons = {}, onEquip, onToggleLock) {
     this.totalSlots = 15; 
     this.items = new Array(this.totalSlots).fill(null);
+    this.itemIcons = itemIcons;
     
     startingItems.forEach((item, i) => {
       if (i < this.totalSlots) this.items[i] = item;
@@ -21,6 +22,11 @@ export class InventoryManager {
       this.onEquip(this.items[0]);
       this.inspectItem(this.items[0]);
     }
+  }
+
+  _getIconUrl(itemName) {
+    if (!itemName) return '';
+    return this.itemIcons[itemName] || `/custom-png/${itemName.toLowerCase()}.png`;
   }
 
   _buildUI() {
@@ -111,10 +117,16 @@ export class InventoryManager {
   }
 
   inspectItem(itemName) {
-    if (!itemName || this.inspectedItemName === itemName) return;
+    if (!itemName) {
+      this.inspectedItemName = null;
+      this.inspectTitle.innerText = '';
+      this.inspectPreviewImg.style.display = 'none';
+      return;
+    }
+    if (this.inspectedItemName === itemName) return;
     this.inspectedItemName = itemName;
     this.inspectTitle.innerText = itemName;
-    this.inspectPreviewImg.src = `/custom-png/${itemName.toLowerCase()}.png`;
+    this.inspectPreviewImg.src = this._getIconUrl(itemName);
     this.inspectPreviewImg.style.display = 'block';
   }
 
@@ -136,9 +148,10 @@ export class InventoryManager {
       `;
       
       if (item) {
+        const iconUrl = this._getIconUrl(item);
         slot.draggable = true;
         slot.innerHTML = `
-          <img src="/custom-png/${item.toLowerCase()}.png" alt="${item}" style="width: 100%; height: 100%; object-fit: contain; transform: scale(1.3) translate(4px, 6px); pointer-events: none;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
+          <img src="${iconUrl}" alt="${item}" style="width: 100%; height: 100%; object-fit: contain; transform: scale(1.3) translate(4px, 6px); pointer-events: none;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" />
           <span style="display: none; color: ${isActive ? '#000' : '#ccc'}; font-family: monospace; font-size: 0.9rem; font-weight: bold; pointer-events: none;">
             ${item.substring(0,3).toUpperCase()}
           </span>
@@ -223,6 +236,17 @@ export class InventoryManager {
       return true; 
     }
     return false;
+  }
+
+  getActiveItem() {
+    return this.items[this.activeHotbarIndex];
+  }
+
+  consumeActiveItem() {
+    this.items[this.activeHotbarIndex] = null;
+    this.inspectItem(null);
+    this.render();
+    this.onEquip(null);
   }
 
   toggle() {

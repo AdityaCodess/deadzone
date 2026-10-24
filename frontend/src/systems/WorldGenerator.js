@@ -92,10 +92,11 @@ export class WorldGenerator {
       glowInstanced.setMatrixAt(i, dummy.matrix);
     }
 
-    poleInstanced.instanceMatrix.needsUpdate = true;
-    armInstanced.instanceMatrix.needsUpdate = true;
-    bulbInstanced.instanceMatrix.needsUpdate = true;
-    glowInstanced.instanceMatrix.needsUpdate = true;
+    // Inside _buildInstancedStreetLamps() in WorldGenerator.js:
+    poleInstanced.frustumCulled = false;
+    armInstanced.frustumCulled = false;
+    bulbInstanced.frustumCulled = false;
+    glowInstanced.frustumCulled = false;
 
     this.scene.add(poleInstanced, armInstanced, bulbInstanced, glowInstanced);
     this.lampTransforms = [];

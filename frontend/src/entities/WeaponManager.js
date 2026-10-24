@@ -1,17 +1,23 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { shaderPipeline } from '../systems/ShaderPipeline.js';
 
 export class WeaponManager {
-  constructor(scene, camera, playerModel, serverWeapons, audioManager) {
+  constructor(scene, camera, playerModel, serverWeapons, serverConsumables, audioManager) {
     this.scene = scene;
     this.camera = camera;
     this.playerModel = playerModel;
     this.serverWeapons = serverWeapons; 
+    this.serverConsumables = serverConsumables || {};
     this.audioManager = audioManager;
     
-    this.currentWeaponName = 'Pistol';
+    this.currentWeaponName = null;
     this.weaponMesh = null;
     this.standaloneReloadMesh = null;
     this.reloadMeshCache = {};
+    this.consumableMeshCache = {};
+    this.activeConsumableMesh = null;
+    this.loader = new GLTFLoader();
     
     this.isReloading = false;
     this.reloadTimer = 0;
@@ -32,10 +38,8 @@ export class WeaponManager {
     this.raycaster = new THREE.Raycaster();
     this.rayVec = new THREE.Vector2();
 
-    // Shared tracer pool to avoid allocating/disposing geometry on every bullet
     this.sharedTracerMat = new THREE.LineBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.6 });
 
-    // Pre-allocated temp vectors for reload math
     this._tempCamPos = new THREE.Vector3();
     this._tempCamDir = new THREE.Vector3();
     this._tempCamRight = new THREE.Vector3();
@@ -45,32 +49,77 @@ export class WeaponManager {
 
   stopShooting() {}
 
-  switchWeapon(weaponName) {
+  switchWeapon(itemName) {
     this.stopShooting();
-    
-    if (this.isReloading || this.currentWeaponName === weaponName) return;
+    if (this.isReloading) return;
 
+    // Hide currently visible weapon or consumable mesh
     if (this.weaponMesh) {
       this.weaponMesh.visible = false;
+      this.weaponMesh = null;
+    }
+    if (this.activeConsumableMesh) {
+      this.activeConsumableMesh.visible = false;
+      this.activeConsumableMesh = null;
     }
 
-    if (!weaponName || !this.serverWeapons[weaponName]) {
-       this.currentWeaponName = null;
-       this.weaponMesh = null;
-       return;
+    // Check if the item is a Consumable (e.g. Medkit)
+    if (itemName && this.serverConsumables[itemName]) {
+      this.currentWeaponName = null;
+      this._equipConsumableMesh(itemName);
+      return;
     }
 
-    this.currentWeaponName = weaponName;
-    this.weaponMesh = this.playerModel.getObjectByName(this.visualConfigs[weaponName].meshName);
-    
-    if (this.weaponMesh) {
-      this.weaponMesh.visible = true;
-      this.baseQuaternion.copy(this.weaponMesh.quaternion);
+    // Check if the item is a Weapon
+    if (!itemName || !this.serverWeapons[itemName]) {
+      this.currentWeaponName = null;
+      return;
+    }
+
+    this.currentWeaponName = itemName;
+    if (this.playerModel && this.visualConfigs[itemName]) {
+      this.weaponMesh = this.playerModel.getObjectByName(this.visualConfigs[itemName].meshName);
+      if (this.weaponMesh) {
+        this.weaponMesh.visible = true;
+        this.baseQuaternion.copy(this.weaponMesh.quaternion);
+      }
     }
   }
 
+  _equipConsumableMesh(itemName) {
+    if (!this.playerModel) return;
+    const handNode = this.playerModel.getObjectByName('Pistol')?.parent ||
+                     this.playerModel.getObjectByName('HandR') ||
+                     this.playerModel;
+
+    if (this.consumableMeshCache[itemName]) {
+      this.activeConsumableMesh = this.consumableMeshCache[itemName];
+      this.activeConsumableMesh.visible = true;
+      return;
+    }
+
+    const cfg = this.serverConsumables[itemName];
+    if (!cfg || !cfg.modelPath) return;
+
+    this.loader.load(cfg.modelPath, (gltf) => {
+      const mesh = gltf.scene;
+      shaderPipeline.optimizeModel(mesh, false, true);
+      mesh.scale.setScalar(0.35);
+      mesh.position.set(0, 0.05, 0.15);
+      handNode.add(mesh);
+      this.consumableMeshCache[itemName] = mesh;
+
+      if (!this.currentWeaponName) {
+        this.activeConsumableMesh = mesh;
+        mesh.visible = true;
+      } else {
+        mesh.visible = false;
+      }
+    });
+  }
+
   updateReferences() {
-    if (this.playerModel && !this.weaponMesh && this.currentWeaponName) {
+    if (this.playerModel && !this.weaponMesh && this.currentWeaponName && this.visualConfigs[this.currentWeaponName]) {
       this.weaponMesh = this.playerModel.getObjectByName(this.visualConfigs[this.currentWeaponName].meshName);
       if (this.weaponMesh) {
         this.baseQuaternion.copy(this.weaponMesh.quaternion);

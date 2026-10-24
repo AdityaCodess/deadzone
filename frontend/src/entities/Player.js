@@ -5,14 +5,16 @@ import { WeaponManager } from './WeaponManager.js';
 import { InventoryManager } from '../ui/InventoryManager.js';
 import { InteractionManager } from '../systems/InteractionManager.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
+import { ApiClient } from '../services/apiClient.js';
 
 export class Player {
-  constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory, worldGenerator, audioManager) {
+  constructor(scene, camera, canvas, playerConfig, weaponConfig, consumableConfig, zombieManager, startingInventory, worldGenerator, audioManager) {
     this.scene = scene;
     this.camera = camera;
     this.canvas = canvas;
     this.zombieManager = zombieManager;
     this.weaponConfig = weaponConfig;
+    this.consumableConfig = consumableConfig || {};
     this.worldGenerator = worldGenerator;
     this.audioManager = audioManager;
    
@@ -43,6 +45,9 @@ export class Player {
     
     this.isDead = false;
     this.isShooting = false;
+    this.equippedItemName = null;
+    this.lastConsumableUseTime = 0;
+    this.isUsingConsumable = false;
 
     this.model = null;
     this.mixer = null;
@@ -50,24 +55,31 @@ export class Player {
     this.currentAction = 'Idle_Gun';
     this.weaponManager = null;
 
-    // Shared blood geometry & material so gunshots don't leak memory
     this.sharedBloodGeo = new THREE.BoxGeometry(0.03, 0.03, 0.03);
     this.sharedBloodMat = new THREE.MeshBasicMaterial({ color: 0xcc0000 });
 
-    // Pre-allocated collision & math helpers
     this._playerBox = new THREE.Box3();
     this._minVec = new THREE.Vector3();
     this._maxVec = new THREE.Vector3();
     this._euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
-    // HUD dirty-state cache to prevent 60 FPS DOM rebuilds
     this._lastHudAmmoKey = '';
     this._lastHudHealth = -1;
+
+    // Build icon map from backend consumableConfig
+    const itemIcons = {};
+    for (const [name, cfg] of Object.entries(this.consumableConfig)) {
+      if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
+    }
     
     this.inventoryManager = new InventoryManager(
       startingInventory,
-      (weaponName) => {
-        if (this.weaponManager) this.weaponManager.switchWeapon(weaponName);
+      itemIcons,
+      (itemName) => {
+        this.equippedItemName = itemName;
+        if (this.weaponManager) {
+          this.weaponManager.switchWeapon(itemName);
+        }
       },
       (shouldLock) => {
         if (shouldLock && !this.isDead) {
@@ -159,9 +171,17 @@ export class Player {
           this.actions[clip.name] = this.mixer.clipAction(clip);
         });
 
-        this.weaponManager = new WeaponManager(this.scene, this.camera, this.model, this.weaponConfig, this.audioManager);
+        this.weaponManager = new WeaponManager(
+          this.scene,
+          this.camera,
+          this.model,
+          this.weaponConfig,
+          this.consumableConfig,
+          this.audioManager
+        );
 
-        const activeItem = this.inventoryManager.items[this.inventoryManager.activeHotbarIndex];
+        const activeItem = this.inventoryManager.getActiveItem();
+        this.equippedItemName = activeItem;
         if (activeItem) this.weaponManager.switchWeapon(activeItem);
 
         if (this.actions['Idle_Gun']) this.actions['Idle_Gun'].play();
@@ -237,8 +257,12 @@ export class Player {
     
     document.addEventListener('mousedown', (e) => {
       if (this.controls.isLocked && e.button === 0 && !this.isDead && !this.inventoryManager.isOpen) {
-        this.isShooting = true;
-        this._shoot(); 
+        if (this.equippedItemName && this.consumableConfig[this.equippedItemName]) {
+          this._useConsumable(this.equippedItemName);
+        } else {
+          this.isShooting = true;
+          this._shoot(); 
+        }
       }
     });
 
@@ -247,6 +271,43 @@ export class Player {
         this.isShooting = false;
       }
     });
+  }
+
+  async _useConsumable(itemName) {
+    if (this.isUsingConsumable) return;
+    const stats = this.consumableConfig[itemName];
+    if (!stats) return;
+
+    const now = performance.now();
+    if (now - this.lastConsumableUseTime < (stats.cooldown || 1.0) * 1000) return;
+    if (stats.type === 'heal' && this.health >= this.maxHealth) return;
+
+    this.isUsingConsumable = true;
+    try {
+      const result = await ApiClient.useConsumable(itemName, this.health);
+      if (result && result.valid) {
+        this.health = result.newHealth;
+        this.lastConsumableUseTime = performance.now();
+        this.inventoryManager.consumeActiveItem();
+
+        const healFlash = document.createElement('div');
+        healFlash.style.cssText = `
+          position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+          box-shadow: inset 0 0 120px rgba(0, 220, 80, 0.75);
+          background-color: rgba(0, 160, 60, 0.15); pointer-events: none;
+          transition: opacity 0.4s ease; z-index: 90;
+        `;
+        document.body.appendChild(healFlash);
+        setTimeout(() => {
+          healFlash.style.opacity = '0';
+          setTimeout(() => healFlash.remove(), 400);
+        }, 200);
+      }
+    } catch (err) {
+      console.error('Failed to use consumable via backend:', err);
+    } finally {
+      this.isUsingConsumable = false;
+    }
   }
 
   _onKeyChange(code, isPressed) {
@@ -261,7 +322,6 @@ export class Player {
 
   _shoot() {
     if (!this.weaponManager || !this.weaponManager.currentWeaponName) return;
-    // Raycast ONLY against active zombies instead of the entire scene graph
     const targetList = this.zombieManager ? this.zombieManager.zombies : [];
     const shotResults = this.weaponManager.shoot(targetList);
 
@@ -376,7 +436,7 @@ export class Player {
     if (this.mixer) this.mixer.update(delta);
 
     if (this.isShooting && this.weaponManager && this.controls.isLocked) {
-      if (this.weaponManager.currentWeaponName && this.weaponConfig[this.weaponManager.currentWeaponName].automatic) {
+      if (this.weaponManager.currentWeaponName && this.weaponConfig[this.weaponManager.currentWeaponName]?.automatic) {
         this._shoot();
       }
     }
@@ -443,11 +503,11 @@ export class Player {
 
       if (this.ammoContainer) {
         const wName = this.weaponManager.currentWeaponName;
+        const consumable = this.equippedItemName ? this.consumableConfig[this.equippedItemName] : null;
         const current = wName ? this.weaponManager.ammoState[wName] : 0;
         const isReloading = this.weaponManager.isReloading;
-        const hudKey = `${wName}_${current}_${isReloading}`;
+        const hudKey = `${this.equippedItemName}_${wName}_${current}_${isReloading}`;
 
-        // Only touch DOM when ammo state changes
         if (this._lastHudAmmoKey !== hudKey) {
           this._lastHudAmmoKey = hudKey;
           if (wName) {
@@ -462,6 +522,11 @@ export class Player {
                 <span style="color: #666; font-size: 1.2rem;">/ ${max}</span>
               `;
             }
+          } else if (consumable) {
+            this.ammoContainer.innerHTML = `
+              <span style="font-size: 1rem; color: #33cc33;">${this.equippedItemName.toUpperCase()}</span>
+              <span style="color: #fff; font-size: 1.3rem;">+${consumable.healAmount} HP [LMB]</span>
+            `;
           } else {
             this.ammoContainer.innerHTML = `<span style="color: #aaa; font-size: 1.4rem;">UNARMED</span>`;
           }

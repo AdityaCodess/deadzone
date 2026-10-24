@@ -6,11 +6,12 @@ import { WorldGenerator } from '../systems/WorldGenerator.js';
 import { AudioManager } from '../systems/AudioManager.js';
 import { EnvironmentManager } from '../systems/EnvironmentManager.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
+import { ApiClient } from '../services/apiClient.js';
 
 export class GameEngine {
   constructor(canvas) {
     this.canvas = canvas;
-    this.isDisposed = false; // Guard against React StrictMode double-mount
+    this.isDisposed = false;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x111111);
@@ -39,15 +40,22 @@ export class GameEngine {
 
   async init() {
     try {
-      const response = await fetch('http://localhost:3001/api/config', { cache: 'no-store' });
-      if (this.isDisposed) return; // Abort if React StrictMode already unmounted this instance
-
-      const rawText = await response.text();
-      const gameConfig = JSON.parse(rawText);
+      const gameConfig = await ApiClient.getGameConfig();
       if (this.isDisposed) return;
 
       this.zombieManager = new ZombieManager(this.scene, this.camera, gameConfig.zombies, this.audioManager);
-      this.player = new Player(this.scene, this.camera, this.canvas, gameConfig.player, gameConfig.weapons, this.zombieManager, gameConfig.startingInventory, this.worldGenerator, this.audioManager);
+      this.player = new Player(
+        this.scene,
+        this.camera,
+        this.canvas,
+        gameConfig.player,
+        gameConfig.weapons,
+        gameConfig.consumables,
+        this.zombieManager,
+        gameConfig.startingInventory,
+        this.worldGenerator,
+        this.audioManager
+      );
       
       try {
         await Promise.all([
@@ -55,7 +63,7 @@ export class GameEngine {
           this.audioManager.loadSounds(),
           this.player.loadModel(),
           this.zombieManager.spawnZombie(),
-          this._spawnLoot()
+          this._spawnLoot(gameConfig.worldLoot)
         ]);
       } catch (assetError) {
         console.error("ASSET LOADING FAILED, but starting engine anyway:", assetError);
@@ -70,40 +78,52 @@ export class GameEngine {
     }
   }
 
-  async _spawnLoot() {
-    if (this.isDisposed) return;
+  async _spawnLoot(lootList = []) {
+    if (this.isDisposed || !lootList.length) return;
     const loader = new GLTFLoader();
-    return new Promise((resolve) => {
-      loader.load('/deadzone-assets/Shotgun.gltf', (gltf) => {
-        if (this.isDisposed) {
-          resolve();
-          return;
-        }
-        const shotgun = gltf.scene;
-        shaderPipeline.optimizeModel(shotgun, false, true);
-        
-        shotgun.position.set(0, 0.1, -4);
-        shotgun.rotation.y = Math.PI / 2;
-        
-        shotgun.userData = {
-          isInteractable: true,
-          type: 'pickup',
-          itemName: 'Shotgun'
-        };
 
-        shotgun.traverse((child) => {
-          if (child.isMesh) {
-            child.userData.isInteractable = true; 
+    const spawnPromises = lootList.map((lootCfg) => {
+      return new Promise((resolve) => {
+        loader.load(lootCfg.modelPath, (gltf) => {
+          if (this.isDisposed) {
+            resolve();
+            return;
           }
-        });
+          const itemMesh = gltf.scene;
+          shaderPipeline.optimizeModel(itemMesh, false, true);
 
-        this.scene.add(shotgun);
-        if (this.player && this.player.interactionManager) {
-          this.player.interactionManager.registerInteractable(shotgun);
-        }
-        resolve();
+          const [x, y, z] = lootCfg.position || [0, 0.1, -4];
+          itemMesh.position.set(x, y, z);
+          itemMesh.rotation.y = lootCfg.rotationY || 0;
+          if (lootCfg.scale) {
+            itemMesh.scale.setScalar(lootCfg.scale);
+          }
+
+          itemMesh.userData = {
+            isInteractable: true,
+            type: 'pickup',
+            itemName: lootCfg.itemName
+          };
+
+          itemMesh.traverse((child) => {
+            if (child.isMesh) {
+              child.userData.isInteractable = true;
+            }
+          });
+
+          this.scene.add(itemMesh);
+          if (this.player && this.player.interactionManager) {
+            this.player.interactionManager.registerInteractable(itemMesh);
+          }
+          resolve();
+        }, undefined, (err) => {
+          console.error(`Failed to load loot ${lootCfg.itemName}:`, err);
+          resolve();
+        });
       });
     });
+
+    await Promise.all(spawnPromises);
   }
 
   _bindEvents() {
@@ -153,7 +173,6 @@ export class GameEngine {
       if (obj.geometry) obj.geometry.dispose();
     });
 
-    // Do NOT call forceContextLoss() here because React StrictMode reuses the same <canvas> element!
     this.renderer.dispose();
   }
 }

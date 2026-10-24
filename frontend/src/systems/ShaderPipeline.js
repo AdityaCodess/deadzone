@@ -22,24 +22,32 @@ export class ShaderPipeline {
         varying vec2 vUv;
         void main() {
           vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          #ifdef USE_INSTANCING
+            vec4 worldPosition = modelMatrix * instanceMatrix * vec4(position, 1.0);
+          #else
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          #endif
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
         }
       `,
       fragmentShader: `
+        precision mediump float;
         uniform float uNightFactor;
         uniform vec3 uGlowColor;
         varying vec2 vUv;
         void main() {
           float dist = distance(vUv, vec2(0.5));
           float alpha = smoothstep(0.5, 0.0, dist);
-          alpha = pow(alpha, 1.8) * uNightFactor * 0.55;
-          if (alpha < 0.01) discard;
+          alpha = pow(alpha, 2.0) * uNightFactor * 0.35;
+          if (alpha < 0.005) discard;
           gl_FragColor = vec4(uGlowColor, alpha);
         }
       `,
       transparent: true,
       blending: THREE.AdditiveBlending,
-      depthWrite: false
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1
     });
   }
 
@@ -54,7 +62,6 @@ export class ShaderPipeline {
       return cached;
     }
 
-    // Downscale massive 2K/4K textures to 512px max to slash RAM/VRAM usage by 85%
     const maxDim = 512;
     if (img.width > maxDim || img.height > maxDim) {
       const scale = maxDim / Math.max(img.width, img.height);
@@ -79,7 +86,6 @@ export class ShaderPipeline {
       child.castShadow = castShadow;
       child.receiveShadow = receiveShadow;
 
-      // Strip unnecessary tangents/extra UV sets from geometry to save RAM
       if (child.geometry) {
         child.geometry.deleteAttribute('tangent');
         child.geometry.deleteAttribute('uv2');
@@ -88,7 +94,6 @@ export class ShaderPipeline {
       if (child.material && !Array.isArray(child.material)) {
         const mat = child.material;
 
-        // Deduplicate & downscale textures, and strip costly normal/roughness/metalness maps
         if (mat.map) mat.map = this._compressTexture(mat.map);
         if (mat.normalMap) { mat.normalMap.dispose(); mat.normalMap = null; }
         if (mat.roughnessMap) { mat.roughnessMap.dispose(); mat.roughnessMap = null; }
@@ -101,7 +106,8 @@ export class ShaderPipeline {
           if (sharedMat !== mat) mat.dispose();
           child.material = sharedMat;
         } else {
-          mat.precision = 'lowp';
+          // Keep mediump so PointLights don't quantize into stepped cartoon rings
+          mat.precision = 'mediump';
           this.materialCache.set(key, mat);
         }
       }
