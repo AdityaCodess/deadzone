@@ -4,32 +4,39 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
 
 export class ZombieManager {
-  constructor(scene, playerCamera, serverZombies, audioManager) {
+  constructor(scene, playerCamera, serverZombies, audioManager, worldGenerator) {
     this.scene = scene;
     this.playerCamera = playerCamera;
     this.serverZombies = serverZombies;
     this.audioManager = audioManager;
+    this.worldGenerator = worldGenerator;
     this.zombies = [];
     this.mixers = [];
     this._targetPos = new THREE.Vector3();
+    this._zombieBox = new THREE.Box3();
+    this._zMin = new THREE.Vector3();
+    this._zMax = new THREE.Vector3();
 
     this.baseGltf = null;
+    this.groundYOffset = 0;
     this.loader = new GLTFLoader();
   }
 
-  async spawnZombie(position = new THREE.Vector3(0, 0, -10)) {
+  async spawnZombie(position = new THREE.Vector3(0, 0, -14)) {
     if (!this.baseGltf) {
       this.baseGltf = await new Promise((resolve, reject) => {
         this.loader.load('/deadzone-assets/Zombie_Basic.gltf', (gltf) => {
           shaderPipeline.optimizeModel(gltf.scene, true, true);
+          const box = new THREE.Box3().setFromObject(gltf.scene);
+          // Calculate exact foot offset so zombie shoes touch y = 0.0 road surface
+          this.groundYOffset = -box.min.y;
           resolve(gltf);
         }, undefined, reject);
       });
     }
 
-    // Clone skeleton & share geometry/textures instead of re-parsing the GLTF file
     const zombie = SkeletonUtils.clone(this.baseGltf.scene);
-    zombie.position.copy(position);
+    zombie.position.set(position.x, this.groundYOffset, position.z);
     
     const mixer = new THREE.AnimationMixer(zombie);
     this.mixers.push(mixer);
@@ -46,7 +53,9 @@ export class ZombieManager {
       state: 'alive',
       currentAction: 'Run',
       actions: actions,
-      mixer: mixer
+      mixer: mixer,
+      attackWindupUntil: 0,
+      lastAttackTime: 0
     };
 
     zombie.traverse((child) => {
@@ -76,7 +85,6 @@ export class ZombieManager {
     if (zombie.userData.state === 'dead') return;
     zombie.userData.state = 'dead';
 
-    // 1. Immediately stop the lock-on groan loop and play zombie-death.mp3
     if (this.audioManager) {
       this.audioManager.stopEntityLoop(zombie.userData.id);
       this.audioManager.playShot('zombie_death', 0.35);
@@ -100,26 +108,38 @@ export class ZombieManager {
       deathAction.reset().fadeIn(0.2).setLoop(THREE.LoopOnce, 1).play();
       deathAction.clampWhenFinished = true; 
       zombie.userData.currentAction = 'Death';
-      zombie.position.y += 0.15; 
+      // Keep corpse flush on the asphalt at groundYOffset (removed the +0.15 floating bug)
+      zombie.position.y = this.groundYOffset;
     }
+  }
+
+  _isBlockedByWall(x, z) {
+    if (!this.worldGenerator) return false;
+    const r = 0.45;
+    this._zMin.set(x - r, 0, z - r);
+    this._zMax.set(x + r, 2.0, z + r);
+    this._zombieBox.set(this._zMin, this._zMax);
+    return this.worldGenerator.checkCollision(this._zombieBox, x, z);
   }
 
   update(delta, player) {
     const config = this.serverZombies.basic; 
+    const now = performance.now();
 
     for (let i = 0; i < this.zombies.length; i++) {
       const zombie = this.zombies[i];
       
       const distSqToCam = zombie.position.distanceToSquared(this.playerCamera.position);
-      if (distSqToCam < 3600) {
+      if (distSqToCam < 6400) {
         zombie.userData.mixer.update(delta);
       }
 
       if (zombie.userData.state === 'dead') continue;
 
+      // Ensure alive zombie stays planted on the road surface
+      zombie.position.y = this.groundYOffset;
       const actions = zombie.userData.actions;
 
-      // If player is dead, stop zombie groans and switch to Idle
       if (player && player.isDead) {
         if (this.audioManager) {
           this.audioManager.stopEntityLoop(zombie.userData.id);
@@ -134,17 +154,53 @@ export class ZombieManager {
       }
 
       if (zombie.userData.state === 'alive') {
-        this._targetPos.set(this.playerCamera.position.x, zombie.position.y, this.playerCamera.position.z);
-        const distance = zombie.position.distanceTo(this._targetPos);
+        const px = this.playerCamera.position.x;
+        const pz = this.playerCamera.position.z;
+        this._targetPos.set(px, zombie.position.y, pz);
 
-        // Start/maintain zombie.mp3 loop as soon as zombie is locked on (within 25m)
+        const dx = px - zombie.position.x;
+        const dz = pz - zombie.position.z;
+        const distance = Math.hypot(dx, dz);
+
         if (this.audioManager) {
           this.audioManager.updateEntityLoop(zombie.userData.id, 'zombie', distance, 25, 0.3);
         }
 
-        if (distance > 2.0) {
-          zombie.lookAt(this._targetPos);
-          zombie.translateZ(config.speed * delta); 
+        zombie.lookAt(this._targetPos);
+
+        // 1. PERSONAL SPACE SEPARATION: Never let the zombie overlap or stick inside the player when running
+        const minSeparation = 1.35;
+        if (distance < minSeparation && distance > 0.001) {
+          const pushBack = minSeparation - distance;
+          const nx = dx / distance;
+          const nz = dz / distance;
+          const pushedX = zombie.position.x - nx * pushBack;
+          const pushedZ = zombie.position.z - nz * pushBack;
+          if (!this._isBlockedByWall(pushedX, pushedZ)) {
+            zombie.position.x = pushedX;
+            zombie.position.z = pushedZ;
+          }
+        }
+
+        // 2. MOVEMENT vs ATTACK WINDUP (Zombie stops moving while swinging so player can sprint away)
+        const isSwingingAttack = now < zombie.userData.attackWindupUntil;
+        const attackRange = 1.85;
+
+        if (distance > attackRange && !isSwingingAttack) {
+          const step = Math.min(config.speed * delta, distance - minSeparation);
+          if (step > 0) {
+            const dirX = dx / distance;
+            const dirZ = dz / distance;
+            const nextX = zombie.position.x + dirX * step;
+            const nextZ = zombie.position.z + dirZ * step;
+
+            if (!this._isBlockedByWall(nextX, zombie.position.z)) {
+              zombie.position.x = nextX;
+            }
+            if (!this._isBlockedByWall(zombie.position.x, nextZ)) {
+              zombie.position.z = nextZ;
+            }
+          }
 
           if (zombie.userData.currentAction !== 'Run') {
             if (actions['Run'] && actions[zombie.userData.currentAction]) {
@@ -155,8 +211,7 @@ export class ZombieManager {
             zombie.userData.currentAction = 'Run';
           }
         } else {
-          zombie.lookAt(this._targetPos);
-
+          // Within attack range or finishing attack swing
           const attackClipName = actions['Attack'] ? 'Attack' : (actions['Punch'] ? 'Punch' : 'Run');
           if (zombie.userData.currentAction !== attackClipName) {
             if (actions[attackClipName] && actions[zombie.userData.currentAction]) {
@@ -167,10 +222,12 @@ export class ZombieManager {
             zombie.userData.currentAction = attackClipName;
           }
 
-          if (player && !player.isDead) {
-            if (!zombie.userData.lastAttackTime || performance.now() - zombie.userData.lastAttackTime > config.attackCooldown) {
+          if (player && !player.isDead && distance <= attackRange + 0.3) {
+            if (now - zombie.userData.lastAttackTime > config.attackCooldown) {
               player.takeDamage(config.damage);
-              zombie.userData.lastAttackTime = performance.now();
+              zombie.userData.lastAttackTime = now;
+              // Root the zombie in place for 650ms after swinging so the player can escape
+              zombie.userData.attackWindupUntil = now + 650;
             }
           }
         }

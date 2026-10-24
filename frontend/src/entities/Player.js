@@ -66,9 +66,12 @@ export class Player {
     this._lastHudAmmoKey = '';
     this._lastHudHealth = -1;
 
-    // Build icon map from backend consumableConfig
+    // Build icon map from backend weaponConfig and consumableConfig
     const itemIcons = {};
-    for (const [name, cfg] of Object.entries(this.consumableConfig)) {
+    for (const [name, cfg] of Object.entries(this.weaponConfig || {})) {
+      if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
+    }
+    for (const [name, cfg] of Object.entries(this.consumableConfig || {})) {
       if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
     }
     
@@ -159,8 +162,10 @@ export class Player {
       loader.load('/deadzone-assets/Characters_Matt.gltf', (gltf) => {
         this.model = gltf.scene;
         shaderPipeline.optimizeModel(this.model, true, true);
+        const pBox = new THREE.Box3().setFromObject(this.model);
+        this.footYOffset = -pBox.min.y;
 
-        const weapons = ['Axe', 'Guitar', 'Knife', 'Rifle', 'Shotgun', 'SMG', 'Spear', 'WoodenBat_Barbed', 'WoodenBat_Saw'];
+        const weapons = ['Axe', 'Guitar', 'Knife', 'Pistol', 'Rifle', 'Shotgun', 'SMG', 'Spear', 'WoodenBat_Barbed', 'WoodenBat_Saw'];
         weapons.forEach(w => {
           const mesh = this.model.getObjectByName(w);
           if (mesh) mesh.visible = false;
@@ -177,7 +182,11 @@ export class Player {
           this.model,
           this.weaponConfig,
           this.consumableConfig,
-          this.audioManager
+          this.audioManager,
+          () => {
+            // Automatically remove depleted finite special weapon (Guitar) after its 4s animation
+            this.inventoryManager.consumeActiveItem();
+          }
         );
 
         const activeItem = this.inventoryManager.getActiveItem();
@@ -238,7 +247,7 @@ export class Player {
         }
       }
       
-      if (this.weaponManager && !this.inventoryManager.isOpen) {
+      if (this.weaponManager && !this.inventoryManager.isOpen && !this.weaponManager.isSpecialAnimating) {
         const digit = parseInt(e.key);
         if (!isNaN(digit) && digit >= 1 && digit <= 5) {
           this.inventoryManager.equipHotbar(digit - 1);
@@ -416,7 +425,7 @@ export class Player {
   }
 
   _checkWallCollision() {
-    if (!this.worldGenerator || !this.worldGenerator.colliders) return false;
+    if (!this.worldGenerator) return false;
     const radius = 0.4;
     const height = 1.6;
     const pos = this.camera.position;
@@ -425,11 +434,7 @@ export class Player {
     this._maxVec.set(pos.x + radius, pos.y + 0.2, pos.z + radius);
     this._playerBox.set(this._minVec, this._maxVec);
 
-    const colliders = this.worldGenerator.colliders;
-    for (let i = 0; i < colliders.length; i++) {
-      if (this._playerBox.intersectsBox(colliders[i])) return true;
-    }
-    return false;
+    return this.worldGenerator.checkCollision(this._playerBox, pos.x, pos.z);
   }
 
   update(delta) {
@@ -464,7 +469,7 @@ export class Player {
 
     if (this.model && !this.isDead) {
       this.model.position.copy(this.camera.position);
-      this.model.position.y -= 1.6;
+      this.model.position.y = (this.camera.position.y - 1.6) + (this.footYOffset || 0);
 
       this._euler.setFromQuaternion(this.camera.quaternion, 'YXZ');
       this.model.rotation.y = this._euler.y + Math.PI;
@@ -503,18 +508,27 @@ export class Player {
 
       if (this.ammoContainer) {
         const wName = this.weaponManager.currentWeaponName;
+        const wCfg = wName ? this.weaponManager.serverWeapons[wName] : null;
         const consumable = this.equippedItemName ? this.consumableConfig[this.equippedItemName] : null;
         const current = wName ? this.weaponManager.ammoState[wName] : 0;
         const isReloading = this.weaponManager.isReloading;
-        const hudKey = `${this.equippedItemName}_${wName}_${current}_${isReloading}`;
+        const isSpecialAnim = this.weaponManager.isSpecialAnimating;
+        const hudKey = `${this.equippedItemName}_${wName}_${current}_${isReloading}_${isSpecialAnim}`;
 
         if (this._lastHudAmmoKey !== hudKey) {
           this._lastHudAmmoKey = hudKey;
-          if (wName) {
-            const max = this.weaponManager.serverWeapons[wName].maxAmmo;
+          if (wName && wCfg) {
             if (isReloading) {
               this.ammoContainer.innerHTML = `<span style="color: #ffaa00; font-size: 1.4rem;">RELOADING...</span>`;
+            } else if (isSpecialAnim) {
+              this.ammoContainer.innerHTML = `<span style="color: #ff3366; font-size: 1.4rem;">SHREDDING...</span>`;
+            } else if (wCfg.infiniteAmmo) {
+              this.ammoContainer.innerHTML = `
+                <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
+                <span style="color: #33cc33; font-size: 1.8rem;">INF</span>
+              `;
             } else {
+              const max = wCfg.maxAmmo;
               const color = current <= (max * 0.25) ? '#ff4444' : '#ffffff';
               this.ammoContainer.innerHTML = `
                 <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>

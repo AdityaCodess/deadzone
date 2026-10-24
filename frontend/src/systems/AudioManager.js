@@ -4,7 +4,6 @@ export class AudioManager {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AudioCtx({ latencyHint: 'interactive' });
 
-    // Master Limiter / Compressor: Prevents waveform clipping & tearing when sounds overlap
     this.compressor = this.ctx.createDynamicsCompressor();
     this.compressor.threshold.setValueAtTime(-14, this.ctx.currentTime);
     this.compressor.knee.setValueAtTime(10, this.ctx.currentTime);
@@ -20,7 +19,7 @@ export class AudioManager {
 
     this.buffers = {};
     this.activeShotNodes = [];
-    this.maxConcurrentShots = 6;
+    this.maxConcurrentShots = 8;
 
     this.entityLoops = new Map();
     this.isUnlocked = false;
@@ -73,6 +72,9 @@ export class AudioManager {
     await Promise.all([
       loadAudio('pistol', '/audio/pistol.mp3'),
       loadAudio('shotgun', '/audio/shotgun.mp3'),
+      loadAudio('axe', '/audio/axe.mp3'),
+      loadAudio('bat_barbed', '/audio/bat_barbed.mp3'),
+      loadAudio('guitar', '/audio/guitar.mp3'),
       loadAudio('zombie', '/audio/zombie.mp3'),
       loadAudio('zombie_death', '/audio/zombie-death.mp3')
     ]);
@@ -99,7 +101,11 @@ export class AudioManager {
     const now = this.ctx.currentTime;
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
-    source.playbackRate.setValueAtTime(0.97 + Math.random() * 0.06, now);
+
+    // Keep exact pitch for the 4-second guitar riff; apply slight variation to gunshots/melee
+    if (name !== 'guitar') {
+      source.playbackRate.setValueAtTime(0.97 + Math.random() * 0.06, now);
+    }
 
     const gainNode = this.ctx.createGain();
     gainNode.gain.setValueAtTime(volume, now);
