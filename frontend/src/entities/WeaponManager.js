@@ -11,6 +11,7 @@ export class WeaponManager {
     this.currentWeaponName = 'Pistol';
     this.weaponMesh = null;
     this.standaloneReloadMesh = null;
+    this.reloadMeshCache = {};
     
     this.isReloading = false;
     this.reloadTimer = 0;
@@ -29,13 +30,20 @@ export class WeaponManager {
     }
 
     this.raycaster = new THREE.Raycaster();
-    this.center = new THREE.Vector2(0, 0);
+    this.rayVec = new THREE.Vector2();
+
+    // Shared tracer pool to avoid allocating/disposing geometry on every bullet
+    this.sharedTracerMat = new THREE.LineBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.6 });
+
+    // Pre-allocated temp vectors for reload math
+    this._tempCamPos = new THREE.Vector3();
+    this._tempCamDir = new THREE.Vector3();
+    this._tempCamRight = new THREE.Vector3();
+
     this.updateReferences();
   }
 
-  stopShooting() {
-    // Left empty for structural compatibility; no audio loops need killing anymore
-  }
+  stopShooting() {}
 
   switchWeapon(weaponName) {
     this.stopShooting();
@@ -78,7 +86,7 @@ export class WeaponManager {
     return this.camera.position.clone().add(new THREE.Vector3(0, 0, -0.5));
   }
 
-  shoot(sceneObjects) {
+  shoot(targetObjects) {
     if (this.isReloading || !this.currentWeaponName) {
       this.stopShooting();
       return null;
@@ -87,24 +95,15 @@ export class WeaponManager {
     const config = this.serverWeapons[this.currentWeaponName];
     const now = performance.now();
     
-    if (now - this.lastShotTime < config.fireRate) {
-      return null; 
-    }
-
+    if (now - this.lastShotTime < config.fireRate) return null; 
     if (this.ammoState[this.currentWeaponName] <= 0) {
       this.stopShooting();
       return null;
     }
 
     if (this.audioManager) {
-      // Explicit routing to guarantee shotgun and pistol logic fires correctly
-      if (this.currentWeaponName === 'Rifle') {
-        this.audioManager.playShot('pistol', 0.6); 
-      } else if (this.currentWeaponName === 'Shotgun') {
-        this.audioManager.playShot('shotgun', 0.8); // Slightly louder for punch
-      } else {
-        this.audioManager.playShot('pistol', 0.6);
-      }
+      const soundName = this.currentWeaponName === 'Shotgun' ? 'shotgun' : 'pistol';
+      this.audioManager.playShot(soundName, 0.2);
     }
 
     this.ammoState[this.currentWeaponName]--;
@@ -123,34 +122,25 @@ export class WeaponManager {
     const spread = config.spread || 0;
 
     for (let i = 0; i < pellets; i++) {
-      const offsetX = (Math.random() - 0.5) * spread;
-      const offsetY = (Math.random() - 0.5) * spread;
+      this.rayVec.set((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread);
       
       this.raycaster.far = config.range;
-      this.raycaster.setFromCamera(new THREE.Vector2(offsetX, offsetY), this.camera);
+      this.raycaster.setFromCamera(this.rayVec, this.camera);
       
-      const intersects = this.raycaster.intersectObjects(sceneObjects, true);
-      
-      const validHit = intersects.find(hit => {
-        if (!this.playerModel) return true;
-        let isSelf = false;
-        hit.object.traverseAncestors((ancestor) => {
-          if (ancestor === this.playerModel) isSelf = true;
-        });
-        return !isSelf && hit.object !== this.playerModel;
-      });
+      const intersects = this.raycaster.intersectObjects(targetObjects, true);
+      const validHit = intersects[0];
 
-      const endPoint = validHit ? validHit.point : muzzleOrigin.clone().add(this.raycaster.ray.direction.clone().multiplyScalar(config.range));
+      const endPoint = validHit
+        ? validHit.point
+        : muzzleOrigin.clone().addScaledVector(this.raycaster.ray.direction, config.range);
 
       const tracerGeo = new THREE.BufferGeometry().setFromPoints([muzzleOrigin, endPoint]);
-      const tracerMat = new THREE.LineBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.6 });
-      const tracerLine = new THREE.Line(tracerGeo, tracerMat);
+      const tracerLine = new THREE.Line(tracerGeo, this.sharedTracerMat);
       this.scene.add(tracerLine);
       
       setTimeout(() => {
         this.scene.remove(tracerLine);
         tracerGeo.dispose();
-        tracerMat.dispose();
       }, 45);
 
       if (validHit) {
@@ -176,13 +166,17 @@ export class WeaponManager {
     }
 
     if (this.playerModel) {
-      const sourceMesh = this.playerModel.getObjectByName(this.visualConfigs[this.currentWeaponName].meshName);
-      if (sourceMesh) {
-        this.standaloneReloadMesh = new THREE.Mesh(
-          sourceMesh.geometry.clone(),
-          sourceMesh.material.clone()
-        );
-        this.standaloneReloadMesh.scale.set(1.0, 1.0, 1.0);
+      if (!this.reloadMeshCache[this.currentWeaponName]) {
+        const sourceMesh = this.playerModel.getObjectByName(this.visualConfigs[this.currentWeaponName].meshName);
+        if (sourceMesh) {
+          this.reloadMeshCache[this.currentWeaponName] = new THREE.Mesh(
+            sourceMesh.geometry,
+            sourceMesh.material
+          );
+        }
+      }
+      this.standaloneReloadMesh = this.reloadMeshCache[this.currentWeaponName];
+      if (this.standaloneReloadMesh) {
         this.scene.add(this.standaloneReloadMesh);
       }
     }
@@ -199,17 +193,17 @@ export class WeaponManager {
 
       if (this.standaloneReloadMesh) {
         const easeProgress = 1 - Math.pow(1 - progress, 3);
-        const camPos = this.camera.position.clone();
-        const camDir = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
-        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+        this._tempCamPos.copy(this.camera.position);
+        this._tempCamDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        this._tempCamRight.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
         const arcY = Math.sin(progress * Math.PI) * 0.25;
 
-        const targetPos = camPos
-          .add(camDir.multiplyScalar(0.8))
-          .add(camRight.multiplyScalar(0.2))
-          .add(new THREE.Vector3(0, -0.2 + arcY, 0));
+        this._tempCamPos
+          .addScaledVector(this._tempCamDir, 0.8)
+          .addScaledVector(this._tempCamRight, 0.2);
+        this._tempCamPos.y += -0.2 + arcY;
 
-        this.standaloneReloadMesh.position.copy(targetPos);
+        this.standaloneReloadMesh.position.copy(this._tempCamPos);
         this.standaloneReloadMesh.rotation.x = easeProgress * Math.PI * 4;
         this.standaloneReloadMesh.rotation.y = easeProgress * Math.PI * 2;
       }
@@ -220,12 +214,6 @@ export class WeaponManager {
         
         if (this.standaloneReloadMesh) {
           this.scene.remove(this.standaloneReloadMesh);
-          this.standaloneReloadMesh.geometry.dispose();
-          if (Array.isArray(this.standaloneReloadMesh.material)) {
-            this.standaloneReloadMesh.material.forEach(m => m.dispose());
-          } else {
-            this.standaloneReloadMesh.material.dispose();
-          }
           this.standaloneReloadMesh = null;
         }
 

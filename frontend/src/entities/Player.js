@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { WeaponManager } from './WeaponManager.js';
 import { InventoryManager } from '../ui/InventoryManager.js';
 import { InteractionManager } from '../systems/InteractionManager.js';
+import { shaderPipeline } from '../systems/ShaderPipeline.js';
 
 export class Player {
   constructor(scene, camera, canvas, playerConfig, weaponConfig, zombieManager, startingInventory, worldGenerator, audioManager) {
@@ -48,6 +49,20 @@ export class Player {
     this.actions = {};
     this.currentAction = 'Idle_Gun';
     this.weaponManager = null;
+
+    // Shared blood geometry & material so gunshots don't leak memory
+    this.sharedBloodGeo = new THREE.BoxGeometry(0.03, 0.03, 0.03);
+    this.sharedBloodMat = new THREE.MeshBasicMaterial({ color: 0xcc0000 });
+
+    // Pre-allocated collision & math helpers
+    this._playerBox = new THREE.Box3();
+    this._minVec = new THREE.Vector3();
+    this._maxVec = new THREE.Vector3();
+    this._euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+    // HUD dirty-state cache to prevent 60 FPS DOM rebuilds
+    this._lastHudAmmoKey = '';
+    this._lastHudHealth = -1;
     
     this.inventoryManager = new InventoryManager(
       startingInventory,
@@ -131,6 +146,7 @@ export class Player {
     return new Promise((resolve) => {
       loader.load('/deadzone-assets/Characters_Matt.gltf', (gltf) => {
         this.model = gltf.scene;
+        shaderPipeline.optimizeModel(this.model, true, true);
 
         const weapons = ['Axe', 'Guitar', 'Knife', 'Rifle', 'Shotgun', 'SMG', 'Spear', 'WoodenBat_Barbed', 'WoodenBat_Saw'];
         weapons.forEach(w => {
@@ -149,13 +165,6 @@ export class Player {
         if (activeItem) this.weaponManager.switchWeapon(activeItem);
 
         if (this.actions['Idle_Gun']) this.actions['Idle_Gun'].play();
-
-        this.model.traverse((child) => {
-          if (child.isMesh) {
-            child.castShadow = true;
-            child.receiveShadow = true;
-          }
-        });
 
         this.scene.add(this.model);
         resolve();
@@ -252,7 +261,9 @@ export class Player {
 
   _shoot() {
     if (!this.weaponManager || !this.weaponManager.currentWeaponName) return;
-    const shotResults = this.weaponManager.shoot(this.scene.children);
+    // Raycast ONLY against active zombies instead of the entire scene graph
+    const targetList = this.zombieManager ? this.zombieManager.zombies : [];
+    const shotResults = this.weaponManager.shoot(targetList);
 
     if (shotResults) {
       shotResults.forEach(shot => {
@@ -260,12 +271,9 @@ export class Player {
 
         if (validHit.object.userData.isZombieMesh) {
           const bloodGroup = new THREE.Group();
-          const bGeo = new THREE.BoxGeometry(0.03, 0.03, 0.03);
-          const bMat = new THREE.MeshBasicMaterial({ color: 0xcc0000 });
-          
           const bloodParticles = [];
           for (let i = 0; i < 4; i++) { 
-            const p = new THREE.Mesh(bGeo, bMat);
+            const p = new THREE.Mesh(this.sharedBloodGeo, this.sharedBloodMat);
             p.position.copy(validHit.point);
             p.userData.velocity = new THREE.Vector3(
               (Math.random() - 0.5) * 3,
@@ -288,14 +296,9 @@ export class Player {
               requestAnimationFrame(animateBlood);
             } else {
               this.scene.remove(bloodGroup);
-              bGeo.dispose();
-              bMat.dispose();
             }
           };
           requestAnimationFrame(animateBlood);
-
-          validHit.object.material.color.setHex(0xff3333);
-          setTimeout(() => validHit.object.material.color.setHex(0xffffff), 100);
 
           const zombie = validHit.object.userData.rootZombie;
           this.zombieManager.takeDamage(zombie, shot.damage);
@@ -310,15 +313,12 @@ export class Player {
     this.health -= amount;
 
     const blood = document.createElement('div');
-    blood.style.position = 'fixed';
-    blood.style.top = '0';
-    blood.style.left = '0';
-    blood.style.width = '100vw';
-    blood.style.height = '100vh';
-    blood.style.boxShadow = 'inset 0 0 140px rgba(220, 0, 0, 0.95)';
-    blood.style.backgroundColor = 'rgba(160, 0, 0, 0.3)';
-    blood.style.pointerEvents = 'none';
-    blood.style.transition = 'opacity 0.4s ease';
+    blood.style.cssText = `
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      box-shadow: inset 0 0 140px rgba(220, 0, 0, 0.95);
+      background-color: rgba(160, 0, 0, 0.3); pointer-events: none;
+      transition: opacity 0.4s ease;
+    `;
     document.body.appendChild(blood);
     
     setTimeout(() => {
@@ -359,14 +359,15 @@ export class Player {
     if (!this.worldGenerator || !this.worldGenerator.colliders) return false;
     const radius = 0.4;
     const height = 1.6;
+    const pos = this.camera.position;
     
-    const playerBox = new THREE.Box3(
-      new THREE.Vector3(this.camera.position.x - radius, this.camera.position.y - height, this.camera.position.z - radius),
-      new THREE.Vector3(this.camera.position.x + radius, this.camera.position.y + 0.2, this.camera.position.z + radius)
-    );
+    this._minVec.set(pos.x - radius, pos.y - height, pos.z - radius);
+    this._maxVec.set(pos.x + radius, pos.y + 0.2, pos.z + radius);
+    this._playerBox.set(this._minVec, this._maxVec);
 
-    for (const box of this.worldGenerator.colliders) {
-      if (playerBox.intersectsBox(box)) return true;
+    const colliders = this.worldGenerator.colliders;
+    for (let i = 0; i < colliders.length; i++) {
+      if (this._playerBox.intersectsBox(colliders[i])) return true;
     }
     return false;
   }
@@ -395,13 +396,9 @@ export class Player {
       if (this.isSprintingInput && isMovingForward && !this.isExhausted) {
         isPhysicallySprinting = true;
         currentSpeed = this.baseSpeed * this.sprintMultiplier;
-        this.stamina -= this.staminaDrain * delta;
-        if (this.stamina < 0) this.stamina = 0;
-      } else {
-        if (this.stamina < this.maxStamina) {
-          this.stamina += this.staminaRegen * delta;
-          if (this.stamina > this.maxStamina) this.stamina = this.maxStamina;
-        }
+        this.stamina = Math.max(0, this.stamina - this.staminaDrain * delta);
+      } else if (this.stamina < this.maxStamina) {
+        this.stamina = Math.min(this.maxStamina, this.stamina + this.staminaRegen * delta);
       }
     }
 
@@ -409,15 +406,15 @@ export class Player {
       this.model.position.copy(this.camera.position);
       this.model.position.y -= 1.6;
 
-      const euler = new THREE.Euler().setFromQuaternion(this.camera.quaternion, 'YXZ');
-      this.model.rotation.y = euler.y + Math.PI;
+      this._euler.setFromQuaternion(this.camera.quaternion, 'YXZ');
+      this.model.rotation.y = this._euler.y + Math.PI;
 
-      this.model.position.x += Math.sin(euler.y) * 0.28;
-      this.model.position.z += Math.cos(euler.y) * 0.28;
+      this.model.position.x += Math.sin(this._euler.y) * 0.28;
+      this.model.position.z += Math.cos(this._euler.y) * 0.28;
 
       const armBone = this.model.getObjectByName('LowerArmL') || this.model.getObjectByName('HandL');
       if (armBone) {
-        armBone.rotation.x = euler.x; 
+        armBone.rotation.x = this._euler.x; 
       }
 
       const isMoving = (this.moveState.forward || this.moveState.backward || this.moveState.left || this.moveState.right) && this.controls.isLocked && !this.inventoryManager.isOpen;
@@ -426,11 +423,7 @@ export class Player {
       if (!this.canJump) {
         targetAction = this.actions['Jump_Gun'] ? 'Jump_Gun' : (this.actions['Jump'] ? 'Jump' : 'Idle_Gun');
       } else if (isMoving) {
-        if (isPhysicallySprinting) {
-          targetAction = this.actions['Sprint_Gun'] ? 'Sprint_Gun' : 'Run_Gun';
-        } else {
-          targetAction = 'Run_Gun';
-        }
+        targetAction = (isPhysicallySprinting && this.actions['Sprint_Gun']) ? 'Sprint_Gun' : 'Run_Gun';
       }
 
       if (this.currentAction !== targetAction) {
@@ -446,15 +439,19 @@ export class Player {
     }
     
     if (this.weaponManager) {
-        this.weaponManager.update(delta);
+      this.weaponManager.update(delta);
 
-        if (this.ammoContainer) {
-          const wName = this.weaponManager.currentWeaponName;
+      if (this.ammoContainer) {
+        const wName = this.weaponManager.currentWeaponName;
+        const current = wName ? this.weaponManager.ammoState[wName] : 0;
+        const isReloading = this.weaponManager.isReloading;
+        const hudKey = `${wName}_${current}_${isReloading}`;
+
+        // Only touch DOM when ammo state changes
+        if (this._lastHudAmmoKey !== hudKey) {
+          this._lastHudAmmoKey = hudKey;
           if (wName) {
-            const current = this.weaponManager.ammoState[wName];
             const max = this.weaponManager.serverWeapons[wName].maxAmmo;
-            const isReloading = this.weaponManager.isReloading;
-            
             if (isReloading) {
               this.ammoContainer.innerHTML = `<span style="color: #ffaa00; font-size: 1.4rem;">RELOADING...</span>`;
             } else {
@@ -469,40 +466,37 @@ export class Player {
             this.ammoContainer.innerHTML = `<span style="color: #aaa; font-size: 1.4rem;">UNARMED</span>`;
           }
         }
+      }
     }
 
     if (this.healthContainer) {
       const currentHealth = Math.ceil(Math.max(0, this.health));
-      const hpPercent = (currentHealth / this.maxHealth) * 100;
-      
-      this.healthText.innerHTML = `
-        <span style="color: #aaa;">HEALTH</span>
-        <span style="font-size: 1.8rem; color: ${this.health <= 0 ? '#ff4444' : '#fff'};">${currentHealth}</span>
-      `;
-      
-      this.healthBarFill.style.width = `${hpPercent}%`;
-      
-      if (hpPercent > 50) this.healthBarFill.style.backgroundColor = '#33cc33';
-      else if (hpPercent > 25) this.healthBarFill.style.backgroundColor = '#ffaa00';
-      else this.healthBarFill.style.backgroundColor = '#ff4444';
+      if (this._lastHudHealth !== currentHealth || this.isDead) {
+        this._lastHudHealth = currentHealth;
+        const hpPercent = (currentHealth / this.maxHealth) * 100;
+        
+        if (this.isDead) {
+          this.healthText.innerHTML = `<span style="color: #ff4444; width: 100%; text-align: center; font-size: 1.5rem;">YOU ARE DEAD [R]</span>`;
+        } else {
+          this.healthText.innerHTML = `
+            <span style="color: #aaa;">HEALTH</span>
+            <span style="font-size: 1.8rem; color: #fff;">${currentHealth}</span>
+          `;
+        }
+        
+        this.healthBarFill.style.width = `${hpPercent}%`;
+        if (hpPercent > 50) this.healthBarFill.style.backgroundColor = '#33cc33';
+        else if (hpPercent > 25) this.healthBarFill.style.backgroundColor = '#ffaa00';
+        else this.healthBarFill.style.backgroundColor = '#ff4444';
+      }
       
       const stamPercent = (this.stamina / this.maxStamina) * 100;
       this.staminaBarFill.style.width = `${stamPercent}%`;
-      
-      if (this.isExhausted) {
-        this.staminaBarFill.style.backgroundColor = '#888888'; 
-      } else {
-        this.staminaBarFill.style.backgroundColor = stamPercent < 25 ? '#ff4444' : '#00aaff';
-      }
-
-      if (this.isDead) {
-        this.healthText.innerHTML = `<span style="color: #ff4444; width: 100%; text-align: center; font-size: 1.5rem;">YOU ARE DEAD [R]</span>`;
-      }
+      this.staminaBarFill.style.backgroundColor = this.isExhausted ? '#888888' : (stamPercent < 25 ? '#ff4444' : '#00aaff');
     }
 
     if (!this.isDead) {
       this.velocity.y -= this.gravity * delta;
-      
       this.velocity.x -= this.velocity.x * 10.0 * delta;
       this.velocity.z -= this.velocity.z * 10.0 * delta;
 
@@ -546,7 +540,7 @@ export class Player {
 
     if (this.interactionManager) {
       const canInteract = this.controls.isLocked && !this.isDead && !this.inventoryManager.isOpen;
-      this.interactionManager.update(canInteract);
+      this.interactionManager.update(canInteract, delta);
     }
   }
 }

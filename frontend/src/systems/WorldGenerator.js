@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { shaderPipeline } from './ShaderPipeline.js';
 
 export class WorldGenerator {
   constructor(scene, environmentManager) {
@@ -21,79 +22,83 @@ export class WorldGenerator {
     this.tiles = [];
     this.assets = {};
     this.colliders = []; 
+    this.lampTransforms = [];
 
     this._initLampResources();
   }
 
   _initLampResources() {
-    this.poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5.0, 8);
+    this.poleGeo = new THREE.CylinderGeometry(0.08, 0.12, 5.0, 6);
     this.armGeo = new THREE.BoxGeometry(1.2, 0.08, 0.08);
     this.bulbGeo = new THREE.BoxGeometry(0.4, 0.1, 0.25);
+    this.glowGeo = new THREE.PlaneGeometry(14, 14);
 
-    this.poleMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.8 });
+    this.poleMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
     this.bulbMat = new THREE.MeshStandardMaterial({
       color: 0xffeedd,
       emissive: 0xffaa44,
       emissiveIntensity: 0
     });
-
-    // Procedural radial gradient texture for the ground light spread
-    const canvas = document.createElement('canvas');
-    canvas.width = 128;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    const grad = ctx.createRadialGradient(64, 64, 4, 64, 64, 64);
-    grad.addColorStop(0, 'rgba(255, 180, 90, 1.0)');
-    grad.addColorStop(0.5, 'rgba(255, 160, 60, 0.35)');
-    grad.addColorStop(1, 'rgba(255, 140, 40, 0.0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 128, 128);
-
-    const glowTex = new THREE.CanvasTexture(canvas);
-    this.glowGeo = new THREE.PlaneGeometry(14, 14);
-    this.glowMat = new THREE.MeshBasicMaterial({
-      map: glowTex,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    });
   }
 
-  _createStreetLamp(tileContainer, posX, posZ, localX, localZ, armDirX, armDirZ) {
-    const lampGroup = new THREE.Group();
-    lampGroup.position.set(localX, 0, localZ);
+  _queueStreetLamp(posX, posZ, localX, localZ, armDirX, armDirZ) {
+    const worldX = posX + localX;
+    const worldZ = posZ + localZ;
 
-    const pole = new THREE.Mesh(this.poleGeo, this.poleMat);
-    pole.position.y = 2.5;
-    lampGroup.add(pole);
-
-    // Overhang arm pointing toward the street
-    const arm = new THREE.Mesh(this.armGeo, this.poleMat);
-    arm.position.set(armDirX * 0.5, 4.9, armDirZ * 0.5);
-    if (armDirZ !== 0) arm.rotation.y = Math.PI / 2;
-    lampGroup.add(arm);
-
-    const bulb = new THREE.Mesh(this.bulbGeo, this.bulbMat);
-    bulb.position.set(armDirX * 1.0, 4.82, armDirZ * 1.0);
-    lampGroup.add(bulb);
-
-    // Soft ground light spread decal right under the bulb
-    const glowPatch = new THREE.Mesh(this.glowGeo, this.glowMat);
-    glowPatch.rotation.x = -Math.PI / 2;
-    glowPatch.position.set(armDirX * 1.5, 0.03, armDirZ * 1.5);
-    lampGroup.add(glowPatch);
-
-    tileContainer.add(lampGroup);
+    this.lampTransforms.push({ worldX, worldZ, armDirX, armDirZ });
 
     if (this.environmentManager) {
       const worldLightPos = new THREE.Vector3(
-        posX + localX + armDirX * 1.2,
+        worldX + armDirX * 1.2,
         4.5,
-        posZ + localZ + armDirZ * 1.2
+        worldZ + armDirZ * 1.2
       );
-      this.environmentManager.registerStreetLamp(worldLightPos, this.bulbMat, this.glowMat);
+      this.environmentManager.registerStreetLamp(worldLightPos, this.bulbMat);
     }
+  }
+
+  _buildInstancedStreetLamps() {
+    const count = this.lampTransforms.length;
+    if (count === 0) return;
+
+    const poleInstanced = new THREE.InstancedMesh(this.poleGeo, this.poleMat, count);
+    const armInstanced = new THREE.InstancedMesh(this.armGeo, this.poleMat, count);
+    const bulbInstanced = new THREE.InstancedMesh(this.bulbGeo, this.bulbMat, count);
+    const glowInstanced = new THREE.InstancedMesh(this.glowGeo, shaderPipeline.lampGlowMaterial, count);
+
+    const dummy = new THREE.Object3D();
+
+    for (let i = 0; i < count; i++) {
+      const { worldX, worldZ, armDirX, armDirZ } = this.lampTransforms[i];
+
+      dummy.position.set(worldX, 2.5, worldZ);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      poleInstanced.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(worldX + armDirX * 0.5, 4.9, worldZ + armDirZ * 0.5);
+      dummy.rotation.set(0, armDirZ !== 0 ? Math.PI / 2 : 0, 0);
+      dummy.updateMatrix();
+      armInstanced.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(worldX + armDirX * 1.0, 4.82, worldZ + armDirZ * 1.0);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      bulbInstanced.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(worldX + armDirX * 1.5, 0.03, worldZ + armDirZ * 1.5);
+      dummy.rotation.set(-Math.PI / 2, 0, 0);
+      dummy.updateMatrix();
+      glowInstanced.setMatrixAt(i, dummy.matrix);
+    }
+
+    poleInstanced.instanceMatrix.needsUpdate = true;
+    armInstanced.instanceMatrix.needsUpdate = true;
+    bulbInstanced.instanceMatrix.needsUpdate = true;
+    glowInstanced.instanceMatrix.needsUpdate = true;
+
+    this.scene.add(poleInstanced, armInstanced, bulbInstanced, glowInstanced);
+    this.lampTransforms = [];
   }
 
   async loadAssets() {
@@ -102,12 +107,7 @@ export class WorldGenerator {
     const loadPromise = (name, path, isRoad) => {
       return new Promise((resolve, reject) => {
         loader.load(path, (gltf) => {
-          gltf.scene.traverse((child) => {
-            if (child.isMesh) {
-              child.castShadow = true;
-              child.receiveShadow = true;
-            }
-          });
+          shaderPipeline.optimizeModel(gltf.scene, !isRoad, true);
           
           const box = new THREE.Box3().setFromObject(gltf.scene);
           const center = box.getCenter(new THREE.Vector3());
@@ -157,10 +157,11 @@ export class WorldGenerator {
     const offsetZ = (rows * this.tileSize) / 2 - (this.tileSize / 2);
 
     const foundationGeo = new THREE.PlaneGeometry(cols * this.tileSize, rows * this.tileSize);
-    const foundationMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 1.0 });
+    const foundationMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
     const foundation = new THREE.Mesh(foundationGeo, foundationMat);
     foundation.rotation.x = -Math.PI / 2;
     foundation.position.set(0, -0.05, 0); 
+    foundation.receiveShadow = true;
     this.scene.add(foundation);
 
     const buildingPool = ['bldg_small', 'bldg_med', 'bldg_large'];
@@ -196,18 +197,14 @@ export class WorldGenerator {
 
           if (mesh) tileContainer.add(mesh);
 
-          // Spawn streetlamps on the sidewalk edge (8.2m from center, overhanging inward toward road)
           if (roadConnections >= 3) {
-            // Corner lamp at intersections
-            this._createStreetLamp(tileContainer, posX, posZ, 8.2, 8.2, -1, 0);
+            this._queueStreetLamp(posX, posZ, 8.2, 8.2, -1, 0);
           } else if (isHorizontalRoad) {
-            // Road runs East-West -> place lamp on North/South sidewalk (Z = ±8.2) pointing inward
             const side = ((x + z) % 2 === 0) ? 1 : -1;
-            this._createStreetLamp(tileContainer, posX, posZ, 0, side * 8.2, 0, -side);
+            this._queueStreetLamp(posX, posZ, 0, side * 8.2, 0, -side);
           } else {
-            // Road runs North-South -> place lamp on East/West sidewalk (X = ±8.2) pointing inward
             const side = ((x + z) % 2 === 0) ? 1 : -1;
-            this._createStreetLamp(tileContainer, posX, posZ, side * 8.2, 0, -side, 0);
+            this._queueStreetLamp(posX, posZ, side * 8.2, 0, -side, 0);
           }
         } else if (tileType === 1) {
           mesh = new THREE.Group();
@@ -221,7 +218,6 @@ export class WorldGenerator {
           if (this.assets[randomBldg]) {
             const bldg = this.assets[randomBldg].clone();
             bldg.rotation.y = (Math.floor(Math.random() * 4) * Math.PI) / 2;
-            bldg.traverse((child) => { child.userData = { isWall: true }; });
             mesh.add(bldg);
           }
           
@@ -241,6 +237,9 @@ export class WorldGenerator {
         }
       }
     }
+
+    this._buildInstancedStreetLamps();
+    this.assets = {}; // Free template references after world generation
   }
 
   getRandomRoadPosition() {

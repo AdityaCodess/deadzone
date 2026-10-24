@@ -1,6 +1,3 @@
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
 export class InventoryManager {
   constructor(startingItems, onEquip, onToggleLock) {
     this.totalSlots = 15; 
@@ -16,10 +13,8 @@ export class InventoryManager {
     this.isOpen = false;
     this.activeHotbarIndex = 0;
     this.inspectedItemName = null;
-    this.inspectModel = null;
 
     this._buildUI();
-    this._setupInspectionScene();
     this.render();
     
     if (this.items[0]) {
@@ -29,7 +24,17 @@ export class InventoryManager {
   }
 
   _buildUI() {
-    document.querySelectorAll('#inventory-hotbar, #full-inventory').forEach(el => el.remove());
+    document.querySelectorAll('#inventory-hotbar, #full-inventory, #inv-anim-style').forEach(el => el.remove());
+
+    const style = document.createElement('style');
+    style.id = 'inv-anim-style';
+    style.innerHTML = `
+      @keyframes weaponFloat {
+        0%, 100% { transform: translateY(0px) rotate(-4deg) scale(1.05); }
+        50% { transform: translateY(-10px) rotate(4deg) scale(1.12); }
+      }
+    `;
+    document.head.appendChild(style);
 
     this.hotbarContainer = document.createElement('div');
     this.hotbarContainer.id = 'inventory-hotbar';
@@ -81,14 +86,23 @@ export class InventoryManager {
 
     this.inspectContainer = document.createElement('div');
     this.inspectContainer.style.cssText = `
-      width: 280px; background: #1a1818; border: 2px solid #5a5654; border-radius: 8px; 
+      width: 280px; height: 350px; background: #1a1818; border: 2px solid #5a5654; border-radius: 8px; 
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       box-shadow: inset 0 0 15px rgba(0,0,0,0.8); position: relative; overflow: hidden;
     `;
     
     this.inspectTitle = document.createElement('h3');
-    this.inspectTitle.style.cssText = `position: absolute; top: 10px; margin: 0; color: #fff; font-family: monospace; text-transform: uppercase; z-index: 10; letter-spacing: 1px;`;
+    this.inspectTitle.style.cssText = `position: absolute; top: 14px; margin: 0; color: #fff; font-family: monospace; text-transform: uppercase; z-index: 10; letter-spacing: 1px;`;
     this.inspectContainer.appendChild(this.inspectTitle);
+
+    this.inspectPreviewImg = document.createElement('img');
+    this.inspectPreviewImg.style.cssText = `
+      width: 75%; height: 75%; object-fit: contain;
+      filter: drop-shadow(0 12px 15px rgba(0,0,0,0.85));
+      animation: weaponFloat 3.5s ease-in-out infinite;
+      display: none;
+    `;
+    this.inspectContainer.appendChild(this.inspectPreviewImg);
     
     layoutWrapper.appendChild(this.inspectContainer);
     this.modalContainer.appendChild(layoutWrapper);
@@ -96,63 +110,12 @@ export class InventoryManager {
     document.body.appendChild(this.modalContainer);
   }
 
-  _setupInspectionScene() {
-    this.inspectScene = new THREE.Scene();
-    this.inspectCamera = new THREE.PerspectiveCamera(45, 280 / 350, 0.1, 100);
-    this.inspectCamera.position.set(0, 0, 3);
-    
-    this.inspectRenderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-    this.inspectRenderer.setSize(280, 350);
-    this.inspectRenderer.setPixelRatio(window.devicePixelRatio);
-    this.inspectContainer.appendChild(this.inspectRenderer.domElement);
-
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
-    this.inspectScene.add(ambientLight);
-    
-    const dirLight = new THREE.DirectionalLight(0xffeedd, 2.0);
-    dirLight.position.set(5, 5, 5);
-    this.inspectScene.add(dirLight);
-
-    this._animateInspection = this._animateInspection.bind(this);
-    requestAnimationFrame(this._animateInspection);
-  }
-
   inspectItem(itemName) {
-    if (this.inspectedItemName === itemName) return;
+    if (!itemName || this.inspectedItemName === itemName) return;
     this.inspectedItemName = itemName;
     this.inspectTitle.innerText = itemName;
-
-    if (this.inspectModel) {
-      this.inspectScene.remove(this.inspectModel);
-      this.inspectModel = null;
-    }
-
-    const loader = new GLTFLoader();
-    loader.load(`/deadzone-assets/${itemName}.gltf`, (gltf) => {
-      this.inspectModel = gltf.scene;
-      
-      const box = new THREE.Box3().setFromObject(this.inspectModel);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      
-      this.inspectModel.position.sub(center);
-      
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const scaleConfig = { 'Pistol': 0.7, 'Rifle': 1.5, 'Shotgun': 1.4 };
-      const finalScale = (scaleConfig[itemName] || 1.2) / maxDim;
-      
-      this.inspectModel.scale.set(finalScale, finalScale, finalScale);
-      this.inspectModel.rotation.set(0.2, 0, 0.1);
-      this.inspectScene.add(this.inspectModel);
-    });
-  }
-
-  _animateInspection() {
-    requestAnimationFrame(this._animateInspection);
-    if (this.isOpen && this.inspectModel) {
-      this.inspectModel.rotation.y += 0.01; 
-      this.inspectRenderer.render(this.inspectScene, this.inspectCamera);
-    }
+    this.inspectPreviewImg.src = `/custom-png/${itemName.toLowerCase()}.png`;
+    this.inspectPreviewImg.style.display = 'block';
   }
 
   render() {
@@ -209,7 +172,6 @@ export class InventoryManager {
         this.items[this.activeHotbarIndex] = this.items[index];
         this.items[index] = temp;
         
-        // BUFFER FIX: Let event bubble safely before nuking DOM
         setTimeout(() => {
           this.equipHotbar(this.activeHotbarIndex);
         }, 10);
@@ -236,8 +198,6 @@ export class InventoryManager {
           this.items[fromIndex] = this.items[toIndex];
           this.items[toIndex] = temp;
           
-          // CRITICAL HTML5 DRAG BUG FIX: 
-          // Wait 50ms for browser to completely finish drag events before nuking DOM
           setTimeout(() => {
             if (fromIndex === this.activeHotbarIndex || toIndex === this.activeHotbarIndex) {
               this.equipHotbar(this.activeHotbarIndex);
@@ -262,7 +222,6 @@ export class InventoryManager {
       }
       return true; 
     }
-    console.log("Inventory is full!");
     return false;
   }
 
