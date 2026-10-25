@@ -178,11 +178,11 @@ export class Player {
     document.body.appendChild(this.healthContainer);
   }
 
-  async loadModel() {
+  async loadModel(characterModelPath='deadzone-assets/Characters_Matt.gltf') {
     const loader = new GLTFLoader();
     
     return new Promise((resolve) => {
-      loader.load('/deadzone-assets/Characters_Matt.gltf', (gltf) => {
+      loader.load(characterModelPath, (gltf) => {
         this.model = gltf.scene;
         shaderPipeline.optimizeModel(this.model, true, true);
         const pBox = new THREE.Box3().setFromObject(this.model);
@@ -252,6 +252,11 @@ export class Player {
   }
 
   _bindEvents() {
+    // Inside keydown event listener in Player.js or GameEngine.js for multiplayer:
+    if (this.launchOptions?.mode === 'multi' && e.code === 'Escape') {
+      e.preventDefault();
+      return; // Disables pausing / unlocking during online matches!
+    }
     this.controls.addEventListener('unlock', () => {
       this.isShooting = false;
       this.isSprintingInput = false;

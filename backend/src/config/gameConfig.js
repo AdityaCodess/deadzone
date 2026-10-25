@@ -1,4 +1,18 @@
 export const gameConfig = {
+  // Expandable map settings: Increase gridRows/gridCols anytime (e.g. 35x35 = 700m x 700m)
+  mapConfig: {
+    gridRows: 35,
+    gridCols: 35,
+    tileSize: 20,
+    lootBoxCount: 18,      // Balanced density across the city (not too scarce, not overcrowded)
+    minLootBoxSpacing: 45  // Minimum meters between lootboxes
+  },
+  characters: {
+    Matt:  { name: 'Matt',  modelPath: '/deadzone-assets/Characters_Matt.gltf' },
+    Lis:   { name: 'Lis',   modelPath: '/deadzone-assets/Characters_Lis.gltf' },
+    Shaun: { name: 'Shaun', modelPath: '/deadzone-assets/Characters_Shaun.gltf' },
+    Sam:   { name: 'Sam',   modelPath: '/deadzone-assets/Characters_Sam.gltf' }
+  },
   player: {
     baseSpeed: 45.0,
     sprintMultiplier: 1.65,
@@ -10,18 +24,23 @@ export const gameConfig = {
     staminaRegen: 8.0,
     jumpCost: 20.0
   },
-  // Includes RPG, Grenade, and Medkit right in your hotbar/inventory for instant testing
+  // All weapons, medkits, and ammo pre-loaded for testing
   startingInventory: [
-    { name: 'Pistol', count: 1 },
-    { name: 'Rifle', count: 1 },
-    { name: 'RPG', count: 1 },
-    { name: 'Grenade', count: 2 },
-    { name: 'Medkit', count: 2 },
-    { name: 'rpg_ammo', count: 5 },
-    { name: 'pistol_ammo', count: 36 },
-    { name: 'assault_ammo', count: 90 },
-    { name: 'smg_ammo', count: 70 },
-    { name: 'shotgun_ammo', count: 24 }
+    { name: 'Pistol',       count: 1 },
+    { name: 'Rifle',        count: 1 },
+    { name: 'SMG',          count: 1 },
+    { name: 'Shotgun',      count: 1 },
+    { name: 'RPG',          count: 1 },
+    { name: 'Grenade',      count: 3 },
+    { name: 'Medkit',       count: 2 },
+    { name: 'Axe',          count: 1 },
+    { name: 'Bat',          count: 1 },
+    { name: 'Guitar',       count: 1 },
+    { name: 'pistol_ammo',  count: 60 },
+    { name: 'assault_ammo', count: 120 },
+    { name: 'smg_ammo',     count: 140 },
+    { name: 'shotgun_ammo', count: 32 },
+    { name: 'rpg_ammo',     count: 6 }
   ],
   weapons: {
     Pistol: {
@@ -101,7 +120,7 @@ export const gameConfig = {
       blastAudio: 'blast',
       ammoType: 'rpg_ammo',
       damage: 9999,
-      blastRadius: 11.0, // Larger blast radius than Grenade; instant-kills all zombies in radius
+      blastRadius: 11.0,
       projectileSpeed: 38.0,
       fireRate: 1200,
       range: 120,
@@ -118,7 +137,7 @@ export const gameConfig = {
       audio: 'grenade',
       blastAudio: 'blast',
       damage: 9999,
-      blastRadius: 6.5, // Smaller blast radius than RPG; instant-kills all zombies in radius
+      blastRadius: 6.5,
       throwSpeed: 18.0,
       fuseTime: 2.0,
       fireRate: 900,
@@ -174,7 +193,7 @@ export const gameConfig = {
       healAmount: 50,
       useTime: 2.0,
       cooldown: 1.5,
-      maxStack: 2, // 2 Medkits per slot!
+      maxStack: 2,
       targetSize: 0.45,
       handSize: 0.25,
       modelPath: '/deadzone-assets/medkit.gltf',
@@ -200,7 +219,6 @@ export const gameConfig = {
     },
     smg_ammo: {
       label: 'SMG Ammo',
-      // Uses pistol_ammo.gltf if you don't have a separate smg_ammo.gltf file
       modelPath: '/deadzone-assets/pistol_ammo.gltf',
       iconPath: '/custom-png/smg_ammo.png',
       targetSize: 0.38,
@@ -230,7 +248,7 @@ export const gameConfig = {
       speed: 4.2,
       damage: 15,
       attackCooldown: 1200,
-      corpseCleanupDelay: 5.0 // Destroy dead zombie meshes after 5s to save RAM
+      corpseCleanupDelay: 5.0
     }
   }
 };

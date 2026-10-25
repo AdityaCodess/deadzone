@@ -2,16 +2,19 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { Player } from '../entities/Player.js';
 import { ZombieManager } from '../entities/ZombieManager.js';
+import { RemotePlayerManager } from '../entities/RemotePlayerManager.js';
 import { WorldGenerator } from '../systems/WorldGenerator.js';
 import { AudioManager } from '../systems/AudioManager.js';
 import { EnvironmentManager } from '../systems/EnvironmentManager.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
 import { ApiClient } from '../services/apiClient.js';
 import { MinimapManager } from '../ui/MinimapManager.js';
+import { networkManager } from '../systems/NetworkManager.js';
 
 export class GameEngine {
-  constructor(canvas) {
+  constructor(canvas, launchOptions = {}) {
     this.canvas = canvas;
+    this.launchOptions = launchOptions;
     this.isDisposed = false;
 
     this.scene = new THREE.Scene();
@@ -28,9 +31,11 @@ export class GameEngine {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
     this.prevTime = performance.now();
+    this._netSyncTimer = 0;
     
     this.player = null;
     this.zombieManager = null;
+    this.remotePlayerManager = new RemotePlayerManager(this.scene);
     this.minimapManager = null;
     this.audioManager = new AudioManager();
     this.gltfLoader = new GLTFLoader();
@@ -49,13 +54,20 @@ export class GameEngine {
       const gameConfig = await ApiClient.getGameConfig();
       if (this.isDisposed) return;
 
+      const activeWorldState = this.launchOptions.worldState || gameConfig.worldState;
+      const chosenChar = this.launchOptions.character || 'Matt';
+      const charModelPath = gameConfig.characters?.[chosenChar]?.modelPath || `/deadzone-assets/Characters_${chosenChar}.gltf`;
+
       this.zombieManager = new ZombieManager(
         this.scene,
         this.camera,
         gameConfig.zombies,
         this.audioManager,
         this.worldGenerator,
-        (dropData) => this.spawnSingleGroundDrop(dropData)
+        (dropData) => {
+          this.spawnSingleGroundDrop(dropData);
+          networkManager.notifyItemDropped(dropData);
+        }
       );
 
       this.player = new Player(
@@ -70,21 +82,30 @@ export class GameEngine {
         gameConfig.startingInventory,
         this.worldGenerator,
         this.audioManager,
-        (dropData) => this.spawnSingleGroundDrop(dropData)
+        (dropData) => {
+          this.spawnSingleGroundDrop(dropData);
+          networkManager.notifyItemDropped(dropData);
+        }
       );
       
       try {
         await Promise.all([
-          this.worldGenerator.generate(gameConfig.worldState),
+          this.worldGenerator.generate(activeWorldState),
           this.audioManager.loadSounds(),
-          this.player.loadModel(),
-          this._spawnAuthoritativeWorldLoot(gameConfig.worldState)
+          this.player.loadModel(charModelPath),
+          this._spawnAuthoritativeWorldLoot(activeWorldState)
         ]);
 
-        // Spawn a cluster of zombies down the street so you can test RPG vs Grenade blast radius immediately
+        if (this.launchOptions.mode === 'multi' && this.launchOptions.room) {
+          this._setupMultiplayerSync(this.launchOptions.room);
+          await this.remotePlayerManager.spawnRemotePlayers(
+            this.launchOptions.room.players,
+            networkManager.socket?.id
+          );
+        }
+
         await this.zombieManager.spawnZombie(new THREE.Vector3(-1.5, 0, -18));
         await this.zombieManager.spawnZombie(new THREE.Vector3(1.5, 0, -18));
-        await this.zombieManager.spawnZombie(new THREE.Vector3(0, 0, -21));
         for (let i = 0; i < 6; i++) {
           const roadPos = this.worldGenerator.getRandomRoadPosition(25, 90);
           await this.zombieManager.spawnZombie(roadPos);
@@ -109,19 +130,41 @@ export class GameEngine {
     }
   }
 
+  _setupMultiplayerSync(room) {
+    const myPlayer = room.players.find(p => p.socketId === networkManager.socket?.id);
+    if (myPlayer && myPlayer.position) {
+      this.camera.position.set(myPlayer.position[0], 1.6, myPlayer.position[2]);
+    }
+
+    networkManager.onRemotePlayerMoved = (data) => {
+      this.remotePlayerManager.onNetworkMove(data);
+    };
+    networkManager.onRemotePlayerLeft = (socketId) => {
+      this.remotePlayerManager.removePlayer(socketId);
+    };
+    networkManager.onWorldRemoveDrop = ({ dropId }) => {
+      this.player?.interactionManager?.removeInteractableById(dropId);
+    };
+    networkManager.onWorldSpawnDrop = ({ drop }) => {
+      this.spawnSingleGroundDrop(drop);
+    };
+    networkManager.onWorldSyncLootBox = ({ boxId, boxEmpty }) => {
+      if (boxEmpty) {
+        this.player?.interactionManager?.removeInteractableById(boxId);
+      }
+    };
+  }
+
   async _spawnAuthoritativeWorldLoot(worldState) {
     if (this.isDisposed || !worldState) return;
-
     const dropPromises = (worldState.groundDrops || []).map(drop => this.spawnSingleGroundDrop(drop));
     const boxPromises = (worldState.lootBoxes || []).map(box => this._spawnLootBoxMesh(box));
-
     await Promise.all([...dropPromises, ...boxPromises]);
   }
 
   async spawnSingleGroundDrop(dropCfg) {
     if (this.isDisposed || !dropCfg) return;
 
-    // If the item has no GLTF (such as ammo packs), create a clean 3D ammo crate mesh
     if (!dropCfg.modelPath) {
       const crate = new THREE.Mesh(this.ammoPackGeo, this.ammoPackMat);
       const [x, , z] = dropCfg.position || [0, 0.12, 0];
@@ -134,9 +177,7 @@ export class GameEngine {
         count: dropCfg.count || 1
       };
       this.scene.add(crate);
-      if (this.player?.interactionManager) {
-        this.player.interactionManager.registerInteractable(crate);
-      }
+      this.player?.interactionManager?.registerInteractable(crate);
       return;
     }
 
@@ -180,9 +221,7 @@ export class GameEngine {
         });
 
         this.scene.add(itemWrapper);
-        if (this.player?.interactionManager) {
-          this.player.interactionManager.registerInteractable(itemWrapper);
-        }
+        this.player?.interactionManager?.registerInteractable(itemWrapper);
         resolve();
       }, undefined, () => resolve());
     });
@@ -227,9 +266,7 @@ export class GameEngine {
         });
 
         this.scene.add(wrapper);
-        if (this.player?.interactionManager) {
-          this.player.interactionManager.registerInteractable(wrapper);
-        }
+        this.player?.interactionManager?.registerInteractable(wrapper);
         resolve();
       }, undefined, () => resolve());
     });
@@ -256,6 +293,24 @@ export class GameEngine {
 
     if (this.player) {
       this.player.update(delta);
+    }
+
+    if (this.remotePlayerManager) {
+      this.remotePlayerManager.update(delta);
+    }
+
+    // Broadcast local player transform to multiplayer room at 20Hz
+    if (this.launchOptions.mode === 'multi' && this.player && this.player.model) {
+      this._netSyncTimer += delta;
+      if (this._netSyncTimer >= 0.05) {
+        this._netSyncTimer = 0;
+        networkManager.sendPlayerState(
+          this.camera.position,
+          this.player.model.rotation.y,
+          this.player.currentAction,
+          this.player.equippedItemName
+        );
+      }
     }
     
     if (this.zombieManager && this.player) {

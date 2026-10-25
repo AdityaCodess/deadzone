@@ -1,6 +1,6 @@
 export class InventoryManager {
   constructor(startingItems, itemIcons = {}, maxStacks = {}, onEquip, onToggleLock) {
-    this.totalSlots = 15; 
+    this.totalSlots = 20; 
     this.items = new Array(this.totalSlots).fill(null);
     this.itemIcons = itemIcons;
     this.maxStacks = maxStacks;

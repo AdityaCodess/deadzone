@@ -3,12 +3,7 @@ import { gameConfig } from '../config/gameConfig.js';
 
 class WorldService {
   constructor() {
-    this.gridRows = 29;
-    this.gridCols = 29;
-    this.tileSize = 20;
-    this.offsetX = (this.gridCols * this.tileSize) / 2 - (this.tileSize / 2);
-    this.offsetZ = (this.gridRows * this.tileSize) / 2 - (this.tileSize / 2);
-
+    this.syncMapDimensions();
     this.mapSeed = Date.now();
     this.mapLayout = [];
     this.buildingPlacements = [];
@@ -17,17 +12,33 @@ class WorldService {
     this.groundDrops = new Map();
     this.lootBoxes = new Map();
     this.playerStates = new Map();
-    this.setPlayerEquipped = (playerId, itemName) => {
-      this.playerStates.set(playerId, { equipped: itemName, updatedAt: Date.now() });
-    }
-    this.getPlayerState = (playerId) => {
-      return this.playerStates.get(playerId) || { equipped: null };
-    }
 
     this.generateNewWorld();
   }
 
+  syncMapDimensions() {
+    const cfg = gameConfig.mapConfig || {};
+    this.gridRows = cfg.gridRows || 35;
+    this.gridCols = cfg.gridCols || 35;
+    this.tileSize = cfg.tileSize || 20;
+    this.targetLootBoxes = cfg.lootBoxCount || 18;
+    this.minLootBoxSpacing = cfg.minLootBoxSpacing || 45;
+    this.offsetX = (this.gridCols * this.tileSize) / 2 - (this.tileSize / 2);
+    this.offsetZ = (this.gridRows * this.tileSize) / 2 - (this.tileSize / 2);
+  }
+
+  // Call this with custom rows/cols anytime you want to dynamically expand the map!
+  expandMap(newRows, newCols, newLootBoxCount) {
+    if (newRows) gameConfig.mapConfig.gridRows = newRows;
+    if (newCols) gameConfig.mapConfig.gridCols = newCols;
+    if (newLootBoxCount) gameConfig.mapConfig.lootBoxCount = newLootBoxCount;
+    this.syncMapDimensions();
+    this.generateNewWorld();
+  }
+
   generateNewWorld() {
+    this.syncMapDimensions();
+    this.mapSeed = Date.now();
     this.groundDrops.clear();
     this.lootBoxes.clear();
     this.buildingPlacements = [];
@@ -66,7 +77,7 @@ class WorldService {
 
     for (let i = 0; i < rList.length - 1; i++) {
       for (let j = 0; j < cList.length - 1; j++) {
-        if (Math.random() < 0.28) {
+        if (Math.random() < 0.30) {
           const r1 = rList[i], r2 = rList[i + 1];
           const c1 = cList[j], c2 = cList[j + 1];
           if (c2 - c1 >= 3) {
@@ -136,23 +147,24 @@ class WorldService {
     return { modelPath: null, targetSize: 0.4 };
   }
 
-  // No loose loot on roads! Only 5 Supply Lootboxes across the entire city (minimum 80m apart)
   _seedLootBoxesOnly() {
     const placedPositions = [];
 
-    // 1 box near spawn so you can test it, plus 4 scattered across the city
-    const firstBoxPos = [0, 0.02, 0];
+    // 1 box near center intersection + 17 distributed across city blocks/avenues
+    const firstBoxPos = [4.5, 0.02, -9.0];
     this._createLootBox(firstBoxPos);
     placedPositions.push(firstBoxPos);
 
     let attempts = 0;
-    while (placedPositions.length < 5 && attempts < 100) {
+    while (placedPositions.length < this.targetLootBoxes && attempts < 350) {
       attempts++;
       const road = this.roadPositions[Math.floor(Math.random() * this.roadPositions.length)];
       if (!road) continue;
 
-      const candidate = [road[0] + (Math.random() - 0.5) * 6, 0.02, road[2] + (Math.random() - 0.5) * 6];
-      const tooClose = placedPositions.some(p => Math.hypot(p[0] - candidate[0], p[2] - candidate[2]) < 85);
+      const candidate = [road[0] + (Math.random() - 0.5) * 8, 0.02, road[2] + (Math.random() - 0.5) * 8];
+      const tooClose = placedPositions.some(
+        p => Math.hypot(p[0] - candidate[0], p[2] - candidate[2]) < this.minLootBoxSpacing
+      );
 
       if (!tooClose) {
         this._createLootBox(candidate);
@@ -163,7 +175,6 @@ class WorldService {
 
   _createLootBox(position) {
     const id = `box_${crypto.randomUUID().slice(0, 8)}`;
-    // Full loot table including weapons, RPG, Grenade, Medkit, and ammo types
     const possibleItems = [
       { itemName: 'Medkit', count: 1 },
       { itemName: 'Grenade', count: 1 },
@@ -175,12 +186,12 @@ class WorldService {
       { itemName: 'pistol_ammo', count: 15 },
       { itemName: 'SMG', count: 1 },
       { itemName: 'Shotgun', count: 1 },
+      { itemName: 'Rifle', count: 1 },
       { itemName: 'Axe', count: 1 },
       { itemName: 'Bat', count: 1 },
       { itemName: 'Guitar', count: 1 }
     ];
 
-    // Capped to 2 or 3 items max per lootbox so it's not overpowered
     const numItems = 2 + Math.floor(Math.random() * 2);
     const items = [];
     for (let i = 0; i < numItems; i++) {
@@ -246,7 +257,6 @@ class WorldService {
     };
   }
 
-  // Only a 25% chance a zombie drops loot when killed!
   rollZombieLoot(position) {
     if (Math.random() > 0.25) return null;
     const table = [
@@ -260,6 +270,10 @@ class WorldService {
     ];
     const pick = table[Math.floor(Math.random() * table.length)];
     return this.createGroundDrop(pick.itemName, pick.count, [position[0], 0.02, position[2]]);
+  }
+
+  setPlayerEquipped(playerId, itemName) {
+    this.playerStates.set(playerId, { equipped: itemName, updatedAt: Date.now() });
   }
 
   getWorldState() {
