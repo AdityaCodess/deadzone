@@ -2,14 +2,17 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
+import { ApiClient } from '../services/apiClient.js';
 
 export class ZombieManager {
-  constructor(scene, playerCamera, serverZombies, audioManager, worldGenerator) {
+  constructor(scene, playerCamera, serverZombies, audioManager, worldGenerator, onZombieDropCallback) {
     this.scene = scene;
     this.playerCamera = playerCamera;
     this.serverZombies = serverZombies;
     this.audioManager = audioManager;
     this.worldGenerator = worldGenerator;
+    this.onZombieDropCallback = onZombieDropCallback;
+
     this.zombies = [];
     this.mixers = [];
     this._targetPos = new THREE.Vector3();
@@ -28,7 +31,6 @@ export class ZombieManager {
         this.loader.load('/deadzone-assets/Zombie_Basic.gltf', (gltf) => {
           shaderPipeline.optimizeModel(gltf.scene, true, true);
           const box = new THREE.Box3().setFromObject(gltf.scene);
-          // Calculate exact foot offset so zombie shoes touch y = 0.0 road surface
           this.groundYOffset = -box.min.y;
           resolve(gltf);
         }, undefined, reject);
@@ -55,7 +57,8 @@ export class ZombieManager {
       actions: actions,
       mixer: mixer,
       attackWindupUntil: 0,
-      lastAttackTime: 0
+      lastAttackTime: 0,
+      deathTimestamp: 0
     };
 
     zombie.traverse((child) => {
@@ -72,7 +75,7 @@ export class ZombieManager {
   }
 
   takeDamage(zombie, amount) {
-    if (zombie.userData.state === 'dead') return;
+    if (!zombie || zombie.userData.state === 'dead') return;
 
     zombie.userData.health -= amount;
 
@@ -84,6 +87,7 @@ export class ZombieManager {
   killZombie(zombie) {
     if (zombie.userData.state === 'dead') return;
     zombie.userData.state = 'dead';
+    zombie.userData.deathTimestamp = performance.now();
 
     if (this.audioManager) {
       this.audioManager.stopEntityLoop(zombie.userData.id);
@@ -97,20 +101,41 @@ export class ZombieManager {
     });
 
     const actions = zombie.userData.actions;
-
     if (actions[zombie.userData.currentAction]) {
       actions[zombie.userData.currentAction].fadeOut(0.2);
     }
 
     const deathAction = actions['Death'] || actions['Die'];
-
     if (deathAction) {
       deathAction.reset().fadeIn(0.2).setLoop(THREE.LoopOnce, 1).play();
       deathAction.clampWhenFinished = true; 
       zombie.userData.currentAction = 'Death';
-      // Keep corpse flush on the asphalt at groundYOffset (removed the +0.15 floating bug)
       zombie.position.y = this.groundYOffset;
     }
+
+    // Request authoritative loot drop from server at the zombie's death location
+    const deathPos = [zombie.position.x, 0.02, zombie.position.z];
+    ApiClient.requestZombieLoot(deathPos).then((res) => {
+      if (res && res.valid && res.drop && this.onZombieDropCallback) {
+        this.onZombieDropCallback(res.drop);
+      }
+    }).catch(() => {});
+  }
+
+  _destroyZombieCorpse(index) {
+    const zombie = this.zombies[index];
+    if (!zombie) return;
+
+    const mixer = zombie.userData.mixer;
+    if (mixer) {
+      mixer.stopAllAction();
+      mixer.uncacheRoot(zombie);
+      const mIdx = this.mixers.indexOf(mixer);
+      if (mIdx !== -1) this.mixers.splice(mIdx, 1);
+    }
+
+    this.scene.remove(zombie);
+    this.zombies.splice(index, 1);
   }
 
   _isBlockedByWall(x, z) {
@@ -124,9 +149,10 @@ export class ZombieManager {
 
   update(delta, player) {
     const config = this.serverZombies.basic; 
+    const cleanupDelayMs = (config.corpseCleanupDelay || 5.0) * 1000;
     const now = performance.now();
 
-    for (let i = 0; i < this.zombies.length; i++) {
+    for (let i = this.zombies.length - 1; i >= 0; i--) {
       const zombie = this.zombies[i];
       
       const distSqToCam = zombie.position.distanceToSquared(this.playerCamera.position);
@@ -134,9 +160,18 @@ export class ZombieManager {
         zombie.userData.mixer.update(delta);
       }
 
-      if (zombie.userData.state === 'dead') continue;
+      // CORPSE RAM CLEANUP: Sink dead body at 4s and completely destroy it at 5s (Wave respawning paused)
+      if (zombie.userData.state === 'dead') {
+        const elapsedDead = now - zombie.userData.deathTimestamp;
+        if (elapsedDead > cleanupDelayMs - 1000) {
+          zombie.position.y -= delta * 0.6;
+        }
+        if (elapsedDead >= cleanupDelayMs) {
+          this._destroyZombieCorpse(i);
+        }
+        continue;
+      }
 
-      // Ensure alive zombie stays planted on the road surface
       zombie.position.y = this.groundYOffset;
       const actions = zombie.userData.actions;
 
@@ -168,7 +203,6 @@ export class ZombieManager {
 
         zombie.lookAt(this._targetPos);
 
-        // 1. PERSONAL SPACE SEPARATION: Never let the zombie overlap or stick inside the player when running
         const minSeparation = 1.35;
         if (distance < minSeparation && distance > 0.001) {
           const pushBack = minSeparation - distance;
@@ -182,7 +216,6 @@ export class ZombieManager {
           }
         }
 
-        // 2. MOVEMENT vs ATTACK WINDUP (Zombie stops moving while swinging so player can sprint away)
         const isSwingingAttack = now < zombie.userData.attackWindupUntil;
         const attackRange = 1.85;
 
@@ -211,7 +244,6 @@ export class ZombieManager {
             zombie.userData.currentAction = 'Run';
           }
         } else {
-          // Within attack range or finishing attack swing
           const attackClipName = actions['Attack'] ? 'Attack' : (actions['Punch'] ? 'Punch' : 'Run');
           if (zombie.userData.currentAction !== attackClipName) {
             if (actions[attackClipName] && actions[zombie.userData.currentAction]) {
@@ -226,7 +258,6 @@ export class ZombieManager {
             if (now - zombie.userData.lastAttackTime > config.attackCooldown) {
               player.takeDamage(config.damage);
               zombie.userData.lastAttackTime = now;
-              // Root the zombie in place for 650ms after swinging so the player can escape
               zombie.userData.attackWindupUntil = now + 650;
             }
           }

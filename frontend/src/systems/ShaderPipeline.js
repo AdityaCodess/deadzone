@@ -54,15 +54,17 @@ export class ShaderPipeline {
   _compressTexture(tex) {
     if (!tex || !tex.image) return tex;
     const img = tex.image;
-    const srcKey = img.src || `${img.width}x${img.height}`;
 
-    if (this.textureCache.has(srcKey)) {
-      const cached = this.textureCache.get(srcKey);
-      if (cached !== tex) tex.dispose();
-      return cached;
+    // CRITICAL FIX: Never key by "${width}x${height}" alone!
+    // ImageBitmaps have no .src, so keying by dimensions merged different color-palette atlases into one!
+    const uniqueKey = (img.src && !img.src.startsWith('blob:')) ? img.src : tex.uuid;
+
+    if (this.textureCache.has(uniqueKey)) {
+      return this.textureCache.get(uniqueKey);
     }
 
-    const maxDim = 512;
+    // Only downscale genuinely huge (>1024px) textures; leave 64px-1024px palette atlases untouched so UVs stay crisp!
+    const maxDim = 1024;
     if (img.width > maxDim || img.height > maxDim) {
       const scale = maxDim / Math.max(img.width, img.height);
       const canvas = document.createElement('canvas');
@@ -74,9 +76,7 @@ export class ShaderPipeline {
       tex.needsUpdate = true;
     }
 
-    tex.generateMipmaps = false;
-    tex.minFilter = THREE.LinearFilter;
-    this.textureCache.set(srcKey, tex);
+    this.textureCache.set(uniqueKey, tex);
     return tex;
   }
 
@@ -100,13 +100,13 @@ export class ShaderPipeline {
         if (mat.metalnessMap) { mat.metalnessMap.dispose(); mat.metalnessMap = null; }
         if (mat.aoMap) { mat.aoMap.dispose(); mat.aoMap = null; }
 
-        const key = `${mat.color ? mat.color.getHexString() : 'no'}_${mat.map ? mat.map.uuid : 'nomap'}`;
+        const hasVertexColors = Boolean(mat.vertexColors);
+        const key = `${mat.type}_${mat.color ? mat.color.getHexString() : 'no'}_${mat.map ? mat.map.uuid : 'nomap'}_${hasVertexColors}_${mat.transparent}`;
         if (this.materialCache.has(key)) {
           const sharedMat = this.materialCache.get(key);
           if (sharedMat !== mat) mat.dispose();
           child.material = sharedMat;
         } else {
-          // Keep mediump so PointLights don't quantize into stepped cartoon rings
           mat.precision = 'mediump';
           this.materialCache.set(key, mat);
         }

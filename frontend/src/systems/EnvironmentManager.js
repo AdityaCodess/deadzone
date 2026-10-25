@@ -6,7 +6,7 @@ export class EnvironmentManager {
     this.scene = scene;
     
     this.time = 8; 
-    this.dayDuration = 60; 
+    this.dayDuration = 1200; 
     
     this.ambientLight = new THREE.HemisphereLight(0xffffff, 0x444455, 0.6);
     this.scene.add(this.ambientLight);

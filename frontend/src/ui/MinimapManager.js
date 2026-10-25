@@ -5,7 +5,7 @@ export class MinimapManager {
     this.interactionManager = interactionManager;
 
     this.size = 170;
-    this.zoom = 1.15; // Pixels per world meter
+    this.zoom = 1.15;
     this._buildUI();
   }
 
@@ -42,14 +42,13 @@ export class MinimapManager {
   }
 
   update(playerPosition, playerYaw) {
-    if (!this.ctx || !this.worldGenerator) return;
+    if (!this.ctx || !this.worldGenerator || !this.worldGenerator.mapLayout.length) return;
 
     const ctx = this.ctx;
     const half = this.size / 2;
     ctx.clearRect(0, 0, this.size, this.size);
 
     ctx.save();
-    // Center radar on player and rotate with camera heading so "Up" is always where you look
     ctx.translate(half, half);
     ctx.rotate(playerYaw);
 
@@ -60,7 +59,6 @@ export class MinimapManager {
     const offsetX = this.worldGenerator.offsetX;
     const offsetZ = this.worldGenerator.offsetZ;
 
-    // 1. Draw Procedural City Grid (Roads & Buildings within radar range)
     const maxRadarDist = (half / this.zoom) + tileSize;
     for (let z = 0; z < rows; z++) {
       for (let x = 0; x < cols; x++) {
@@ -82,28 +80,30 @@ export class MinimapManager {
         } else {
           ctx.fillStyle = '#524b48';
           ctx.fillRect(screenX + 1.5, screenY + 1.5, drawSize - 3, drawSize - 3);
-          ctx.strokeStyle = '#756c68';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(screenX + 1.5, screenY + 1.5, drawSize - 3, drawSize - 3);
         }
       }
     }
 
-    // 2. Draw Loot Pickups (Green Dots)
+    // Draw Loot Pickups (Green Dots) & Supply Lootboxes (Gold Squares)
     if (this.interactionManager && this.interactionManager.interactables) {
-      ctx.fillStyle = '#33ff66';
       for (const item of this.interactionManager.interactables) {
         const dx = (item.position.x - playerPosition.x) * this.zoom;
         const dz = (item.position.z - playerPosition.z) * this.zoom;
         if (dx * dx + dz * dz < half * half) {
-          ctx.beginPath();
-          ctx.arc(dx, dz, 3, 0, Math.PI * 2);
-          ctx.fill();
+          if (item.userData.type === 'lootbox') {
+            ctx.fillStyle = '#ffcc00';
+            ctx.fillRect(dx - 3.5, dz - 3.5, 7, 7);
+          } else {
+            ctx.fillStyle = '#33ff66';
+            ctx.beginPath();
+            ctx.arc(dx, dz, 2.8, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
     }
 
-    // 3. Draw Alive Zombies (Red Pulsing Dots)
+    // Draw Alive Zombies (Red Dots)
     if (this.zombieManager && this.zombieManager.zombies) {
       ctx.fillStyle = '#ff3333';
       for (const zombie of this.zombieManager.zombies) {
@@ -120,21 +120,8 @@ export class MinimapManager {
 
     ctx.restore();
 
-    // 4. Draw Player FOV Cone & Center Arrow
     ctx.save();
     ctx.translate(half, half);
-
-    const grad = ctx.createRadialGradient(0, 0, 2, 0, 0, 42);
-    grad.addColorStop(0, 'rgba(255, 255, 255, 0.28)');
-    grad.addColorStop(1, 'rgba(255, 255, 255, 0.0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.arc(0, 0, 42, -Math.PI * 0.72, -Math.PI * 0.28);
-    ctx.closePath();
-    ctx.fill();
-
-    // Player Arrow
     ctx.fillStyle = '#00ddff';
     ctx.beginPath();
     ctx.moveTo(0, -6);
@@ -143,7 +130,6 @@ export class MinimapManager {
     ctx.lineTo(-5, 5);
     ctx.closePath();
     ctx.fill();
-
     ctx.restore();
   }
 

@@ -7,8 +7,6 @@ export class WorldGenerator {
     this.scene = scene;
     this.environmentManager = environmentManager;
     this.tileSize = 20; 
-    
-    // Huge 29x29 grid = 580m x 580m city for vehicles & exploration
     this.gridRows = 29;
     this.gridCols = 29;
     this.offsetX = (this.gridCols * this.tileSize) / 2 - (this.tileSize / 2);
@@ -38,85 +36,13 @@ export class WorldGenerator {
     });
   }
 
-  // Procedurally generates a brand-new city road & building layout every match
-  _generateProceduralLayout() {
-    const rows = this.gridRows;
-    const cols = this.gridCols;
-    const centerR = Math.floor(rows / 2); // 14 -> Z = 0
-    const centerC = Math.floor(cols / 2); // 14 -> X = 0
-
-    // Start with all buildings (1)
-    const grid = Array.from({ length: rows }, () => new Array(cols).fill(1));
-
-    const roadRows = new Set([0, centerR, rows - 1]);
-    const roadCols = new Set([0, centerC, cols - 1]);
-
-    // Randomize horizontal highways (spaced by 2 to 4 tiles so blocks have varied sizes)
-    let r = 2 + Math.floor(Math.random() * 2);
-    while (r < rows - 2) {
-      if (Math.abs(r - centerR) !== 1) roadRows.add(r);
-      r += 2 + Math.floor(Math.random() * 3);
-    }
-
-    // Randomize vertical highways
-    let c = 2 + Math.floor(Math.random() * 2);
-    while (c < cols - 2) {
-      if (Math.abs(c - centerC) !== 1) roadCols.add(c);
-      c += 2 + Math.floor(Math.random() * 3);
-    }
-
-    // Carve main avenues
-    roadRows.forEach(rowIdx => {
-      for (let x = 0; x < cols; x++) grid[rowIdx][x] = 0;
-    });
-    roadCols.forEach(colIdx => {
-      for (let z = 0; z < rows; z++) grid[z][colIdx] = 0;
-    });
-
-    // Carve random cross-streets between avenues for organic city variety
-    const rList = Array.from(roadRows).sort((a, b) => a - b);
-    const cList = Array.from(roadCols).sort((a, b) => a - b);
-
-    for (let i = 0; i < rList.length - 1; i++) {
-      for (let j = 0; j < cList.length - 1; j++) {
-        if (Math.random() < 0.28) {
-          const r1 = rList[i], r2 = rList[i + 1];
-          const c1 = cList[j], c2 = cList[j + 1];
-          if (c2 - c1 >= 3) {
-            const midC = Math.floor((c1 + c2) / 2);
-            if (Math.abs(midC - centerC) !== 1) {
-              for (let z = r1; z <= r2; z++) grid[z][midC] = 0;
-            }
-          }
-        }
-      }
-    }
-
-    // Ensure center spawn intersection (0, 0, 0) has clean 4-way road arms and 4 corner buildings
-    for (let d = -2; d <= 2; d++) {
-      grid[centerR][centerC + d] = 0;
-      grid[centerR + d][centerC] = 0;
-    }
-    grid[centerR - 1][centerC - 1] = 1;
-    grid[centerR - 1][centerC + 1] = 1;
-    grid[centerR + 1][centerC - 1] = 1;
-    grid[centerR + 1][centerC + 1] = 1;
-
-    this.mapLayout = grid;
-  }
-
   _queueStreetLamp(posX, posZ, localX, localZ, armDirX, armDirZ) {
     const worldX = posX + localX;
     const worldZ = posZ + localZ;
-
     this.lampTransforms.push({ worldX, worldZ, armDirX, armDirZ });
 
     if (this.environmentManager) {
-      const worldLightPos = new THREE.Vector3(
-        worldX + armDirX * 1.2,
-        4.5,
-        worldZ + armDirZ * 1.2
-      );
+      const worldLightPos = new THREE.Vector3(worldX + armDirX * 1.2, 4.5, worldZ + armDirZ * 1.2);
       this.environmentManager.registerStreetLamp(worldLightPos, this.bulbMat);
     }
   }
@@ -177,9 +103,6 @@ export class WorldGenerator {
           const center = box.getCenter(new THREE.Vector3());
           const size = box.getSize(new THREE.Vector3());
           
-          // CRITICAL FIX FOR LEG CLIPPING:
-          // Align the TOP walking surface of roads (-box.max.y) to y = 0.0 so feet never sink inside the road mesh!
-          // Align the BOTTOM of buildings (-box.min.y) to y = 0.0 so buildings sit on top of the ground!
           const alignY = isRoad ? -box.max.y : -box.min.y;
           gltf.scene.position.set(-center.x, alignY, -center.z);
           
@@ -200,7 +123,6 @@ export class WorldGenerator {
 
           wrapper.updateMatrixWorld(true);
 
-          // Extract sub-mesh geometries & world transforms for hardware InstancedMesh batching
           const subMeshes = [];
           wrapper.traverse((child) => {
             if (child.isMesh) {
@@ -224,10 +146,7 @@ export class WorldGenerator {
             height: Math.max(20, fittedSize.y * scaleY)
           };
           resolve();
-        }, undefined, (error) => {
-          console.error(`Failed to load asset: ${path}`, error);
-          reject(error);
-        });
+        }, undefined, reject);
       });
     };
 
@@ -241,14 +160,21 @@ export class WorldGenerator {
     ]);
   }
 
-  async generate() {
-    this._generateProceduralLayout();
+  async generate(serverWorldState) {
     await this.loadAssets();
+
+    if (serverWorldState && serverWorldState.mapLayout) {
+      this.gridRows = serverWorldState.gridRows;
+      this.gridCols = serverWorldState.gridCols;
+      this.tileSize = serverWorldState.tileSize;
+      this.offsetX = serverWorldState.offsetX;
+      this.offsetZ = serverWorldState.offsetZ;
+      this.mapLayout = serverWorldState.mapLayout;
+    }
 
     const rows = this.gridRows;
     const cols = this.gridCols;
 
-    // Sub-ground safety plane below road slabs
     const foundationGeo = new THREE.PlaneGeometry(cols * this.tileSize, rows * this.tileSize);
     const foundationMat = new THREE.MeshLambertMaterial({ color: 0x111111 });
     const foundation = new THREE.Mesh(foundationGeo, foundationMat);
@@ -257,7 +183,6 @@ export class WorldGenerator {
     foundation.receiveShadow = true;
     this.scene.add(foundation);
 
-    const buildingPool = ['bldg_small', 'bldg_med', 'bldg_large'];
     const instanceBuckets = {
       road_straight: [],
       road_intersection: [],
@@ -269,85 +194,78 @@ export class WorldGenerator {
 
     const dummy = new THREE.Object3D();
 
+    // Build road tiles from server mapLayout
     for (let z = 0; z < rows; z++) {
       for (let x = 0; x < cols; x++) {
+        if (this.mapLayout[z][x] !== 0) continue;
+
         const posX = (x * this.tileSize) - this.offsetX;
         const posZ = (z * this.tileSize) - this.offsetZ;
-        const tileType = this.mapLayout[z][x];
+        this.roadPositions.push(new THREE.Vector3(posX, 0, posZ));
 
-        if (tileType === 0) {
-          this.roadPositions.push(new THREE.Vector3(posX, 0, posZ));
+        const up = z > 0 ? this.mapLayout[z - 1][x] === 0 : false;
+        const down = z < rows - 1 ? this.mapLayout[z + 1][x] === 0 : false;
+        const left = x > 0 ? this.mapLayout[z][x - 1] === 0 : false;
+        const right = x < cols - 1 ? this.mapLayout[z][x + 1] === 0 : false;
+        
+        const isVertical = up || down;
+        const isHorizontal = left || right;
+        const isIntersection = (isVertical && isHorizontal);
 
-          const up = z > 0 ? this.mapLayout[z - 1][x] === 0 : false;
-          const down = z < rows - 1 ? this.mapLayout[z + 1][x] === 0 : false;
-          const left = x > 0 ? this.mapLayout[z][x - 1] === 0 : false;
-          const right = x < cols - 1 ? this.mapLayout[z][x + 1] === 0 : false;
-          
-          const isVertical = up || down;
-          const isHorizontal = left || right;
-          // Any corner turn, T-junction, or 4-way crossroad uses the intersection tile so roads never conflict
-          const isIntersection = (isVertical && isHorizontal);
-
-          if (isIntersection) {
-            dummy.position.set(posX, 0, posZ);
-            dummy.rotation.set(0, 0, 0);
-            dummy.updateMatrix();
-            instanceBuckets.road_intersection.push(dummy.matrix.clone());
-
-            // Place corner lamp only on actual building corners so it never blocks a cross-street
-            if (z > 0 && x > 0 && this.mapLayout[z - 1][x - 1] === 1 && (x + z) % 2 === 0) {
-              this._queueStreetLamp(posX, posZ, -8.2, -8.2, 1, 0);
-            }
-          } else {
-            dummy.position.set(posX, 0, posZ);
-            dummy.rotation.set(0, isHorizontal ? Math.PI / 2 : 0, 0);
-            dummy.updateMatrix();
-            instanceBuckets.road_straight.push(dummy.matrix.clone());
-
-            // Place streetlamps every 2nd straight road tile on the sidewalk edge
-            if ((x + z) % 2 === 0) {
-              const side = ((x * 3 + z) % 2 === 0) ? 1 : -1;
-              if (isHorizontal) {
-                this._queueStreetLamp(posX, posZ, 0, side * 8.2, 0, -side);
-              } else {
-                this._queueStreetLamp(posX, posZ, side * 8.2, 0, -side, 0);
-              }
-            }
-          }
-        } else if (tileType === 1) {
-          // 1. Pavement base pad
+        if (isIntersection) {
           dummy.position.set(posX, 0, posZ);
           dummy.rotation.set(0, 0, 0);
           dummy.updateMatrix();
-          instanceBuckets.pavement_base.push(dummy.matrix.clone());
+          instanceBuckets.road_intersection.push(dummy.matrix.clone());
 
-          // 2. Random Building
-          const randomBldg = buildingPool[Math.floor(Math.random() * buildingPool.length)];
-          const rotSteps = Math.floor(Math.random() * 4);
-          const rotY = (rotSteps * Math.PI) / 2;
-
+          if (z > 0 && x > 0 && this.mapLayout[z - 1][x - 1] === 1 && (x + z) % 2 === 0) {
+            this._queueStreetLamp(posX, posZ, -8.2, -8.2, 1, 0);
+          }
+        } else {
           dummy.position.set(posX, 0, posZ);
-          dummy.rotation.set(0, rotY, 0);
+          dummy.rotation.set(0, isHorizontal ? Math.PI / 2 : 0, 0);
           dummy.updateMatrix();
-          instanceBuckets[randomBldg].push(dummy.matrix.clone());
+          instanceBuckets.road_straight.push(dummy.matrix.clone());
 
-          // 3. Register tight building collider
-          const tpl = this.meshTemplates[randomBldg];
-          if (tpl) {
-            const hx = (rotSteps % 2 === 1) ? tpl.halfDepth : tpl.halfWidth;
-            const hz = (rotSteps % 2 === 1) ? tpl.halfWidth : tpl.halfDepth;
-            const bldgBox = new THREE.Box3(
-              new THREE.Vector3(posX - hx, -1, posZ - hz),
-              new THREE.Vector3(posX + hx, 50, posZ + hz)
-            );
-            this.colliders.push(bldgBox);
-            this.spatialColliderGrid.set(`${x}_${z}`, bldgBox);
+          if ((x + z) % 2 === 0) {
+            const side = ((x * 3 + z) % 2 === 0) ? 1 : -1;
+            if (isHorizontal) {
+              this._queueStreetLamp(posX, posZ, 0, side * 8.2, 0, -side);
+            } else {
+              this._queueStreetLamp(posX, posZ, side * 8.2, 0, -side, 0);
+            }
           }
         }
       }
     }
 
-    // Build hardware InstancedMeshes for all roads and buildings across the 29x29 city
+    // Build buildings from server buildingPlacements
+    const placements = serverWorldState?.buildingPlacements || [];
+    for (const b of placements) {
+      dummy.position.set(b.posX, 0, b.posZ);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      instanceBuckets.pavement_base.push(dummy.matrix.clone());
+
+      const rotY = (b.rotSteps * Math.PI) / 2;
+      dummy.position.set(b.posX, 0, b.posZ);
+      dummy.rotation.set(0, rotY, 0);
+      dummy.updateMatrix();
+      instanceBuckets[b.asset].push(dummy.matrix.clone());
+
+      const tpl = this.meshTemplates[b.asset];
+      if (tpl) {
+        const hx = (b.rotSteps % 2 === 1) ? tpl.halfDepth : tpl.halfWidth;
+        const hz = (b.rotSteps % 2 === 1) ? tpl.halfWidth : tpl.halfDepth;
+        const bldgBox = new THREE.Box3(
+          new THREE.Vector3(b.posX - hx, -1, b.posZ - hz),
+          new THREE.Vector3(b.posX + hx, 50, b.posZ + hz)
+        );
+        this.colliders.push(bldgBox);
+        this.spatialColliderGrid.set(`${b.x}_${b.z}`, bldgBox);
+      }
+    }
+
     const finalMatrix = new THREE.Matrix4();
     for (const [assetName, matrices] of Object.entries(instanceBuckets)) {
       const count = matrices.length;
@@ -373,7 +291,6 @@ export class WorldGenerator {
     this.meshTemplates = {};
   }
 
-  // O(1) spatial hash wall collision lookup so checking collisions on a huge map takes 0.001ms
   checkCollision(box3, worldX, worldZ) {
     const gx = Math.round((worldX + this.offsetX) / this.tileSize);
     const gz = Math.round((worldZ + this.offsetZ) / this.tileSize);
@@ -396,7 +313,5 @@ export class WorldGenerator {
     return validRoads[Math.floor(Math.random() * validRoads.length)].clone();
   }
 
-  update() {
-    // Hardware InstancedMeshes render the entire city in ~10 draw calls without CPU visibility loops
-  }
+  update() {}
 }

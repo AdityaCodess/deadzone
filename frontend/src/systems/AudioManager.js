@@ -19,7 +19,7 @@ export class AudioManager {
 
     this.buffers = {};
     this.activeShotNodes = [];
-    this.maxConcurrentShots = 8;
+    this.maxConcurrentShots = 10;
 
     this.entityLoops = new Map();
     this.isUnlocked = false;
@@ -30,11 +30,9 @@ export class AudioManager {
   _bindUnlockEvents() {
     this._unlockHandler = () => {
       if (this.isUnlocked || this.isDisposed || this.ctx.state === 'closed') return;
-      
       if (this.ctx.state === 'suspended') {
         this.ctx.resume().catch(() => {});
       }
-
       try {
         const silentBuffer = this.ctx.createBuffer(1, 1, 22050);
         const source = this.ctx.createBufferSource();
@@ -75,6 +73,9 @@ export class AudioManager {
       loadAudio('axe', '/audio/axe.mp3'),
       loadAudio('bat_barbed', '/audio/bat_barbed.mp3'),
       loadAudio('guitar', '/audio/guitar.mp3'),
+      loadAudio('rpg', '/audio/rpg.mp3'),
+      loadAudio('grenade', '/audio/grenade.mp3'),
+      loadAudio('blast', '/audio/blast.mp3'),
       loadAudio('zombie', '/audio/zombie.mp3'),
       loadAudio('zombie_death', '/audio/zombie-death.mp3')
     ]);
@@ -102,7 +103,6 @@ export class AudioManager {
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
 
-    // Keep exact pitch for the 4-second guitar riff; apply slight variation to gunshots/melee
     if (name !== 'guitar') {
       source.playbackRate.setValueAtTime(0.97 + Math.random() * 0.06, now);
     }

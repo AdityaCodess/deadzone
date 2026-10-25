@@ -8,15 +8,17 @@ import { shaderPipeline } from '../systems/ShaderPipeline.js';
 import { ApiClient } from '../services/apiClient.js';
 
 export class Player {
-  constructor(scene, camera, canvas, playerConfig, weaponConfig, consumableConfig, zombieManager, startingInventory, worldGenerator, audioManager) {
+  constructor(scene, camera, canvas, playerConfig, weaponConfig, consumableConfig, ammoConfig, zombieManager, startingInventory, worldGenerator, audioManager, onPlayerDropCallback) {
     this.scene = scene;
     this.camera = camera;
     this.canvas = canvas;
     this.zombieManager = zombieManager;
     this.weaponConfig = weaponConfig;
     this.consumableConfig = consumableConfig || {};
+    this.ammoConfig = ammoConfig || {};
     this.worldGenerator = worldGenerator;
     this.audioManager = audioManager;
+    this.onPlayerDropCallback = onPlayerDropCallback;
    
     this.controls = new PointerLockControls(this.camera, this.canvas);
     this.controls.maxPolarAngle = Math.PI - 0.6;
@@ -50,6 +52,7 @@ export class Player {
     this.isUsingConsumable = false;
 
     this.model = null;
+    this.footYOffset = 0;
     this.mixer = null;
     this.actions = {};
     this.currentAction = 'Idle_Gun';
@@ -66,18 +69,26 @@ export class Player {
     this._lastHudAmmoKey = '';
     this._lastHudHealth = -1;
 
-    // Build icon map from backend weaponConfig and consumableConfig
+    // Build unified icon & stack limit dictionaries from backend config
     const itemIcons = {};
+    const maxStacks = {};
     for (const [name, cfg] of Object.entries(this.weaponConfig || {})) {
       if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
+      maxStacks[name] = cfg.maxStack || 1;
     }
     for (const [name, cfg] of Object.entries(this.consumableConfig || {})) {
       if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
+      maxStacks[name] = cfg.maxStack || 2;
+    }
+    for (const [name, cfg] of Object.entries(this.ammoConfig || {})) {
+      if (cfg.iconPath) itemIcons[name] = cfg.iconPath;
+      maxStacks[name] = cfg.maxStack || 60;
     }
     
     this.inventoryManager = new InventoryManager(
       startingInventory,
       itemIcons,
+      maxStacks,
       (itemName) => {
         this.equippedItemName = itemName;
         if (this.weaponManager) {
@@ -94,7 +105,19 @@ export class Player {
       }
     );
 
-    this.interactionManager = new InteractionManager(this.scene, this.camera, this.inventoryManager);
+    this.interactionManager = new InteractionManager(
+      this.scene,
+      this.camera,
+      this.inventoryManager,
+      (shouldLock) => {
+        if (shouldLock && !this.isDead) {
+          this.canvas.focus();
+          this.controls.lock();
+        } else {
+          this.controls.unlock();
+        }
+      }
+    );
 
     this._buildHUD();
     this._bindEvents();
@@ -165,7 +188,7 @@ export class Player {
         const pBox = new THREE.Box3().setFromObject(this.model);
         this.footYOffset = -pBox.min.y;
 
-        const weapons = ['Axe', 'Guitar', 'Knife', 'Pistol', 'Rifle', 'Shotgun', 'SMG', 'Spear', 'WoodenBat_Barbed', 'WoodenBat_Saw'];
+        const weapons = ['Axe', 'Guitar', 'Knife', 'Pistol', 'Rifle', 'Shotgun', 'SMG', 'Spear', 'WoodenBat_Barbed', 'WoodenBat_Saw', 'RPG', 'Grenade'];
         weapons.forEach(w => {
           const mesh = this.model.getObjectByName(w);
           if (mesh) mesh.visible = false;
@@ -183,9 +206,11 @@ export class Player {
           this.weaponConfig,
           this.consumableConfig,
           this.audioManager,
+          this.inventoryManager,
+          this.zombieManager,
+          this.worldGenerator,
           () => {
-            // Automatically remove depleted finite special weapon (Guitar) after its 4s animation
-            this.inventoryManager.consumeActiveItem();
+            this.inventoryManager.consumeActiveItem(1);
           }
         );
 
@@ -201,6 +226,31 @@ export class Player {
     });
   }
 
+  async _dropEquippedItem() {
+    if (this.weaponManager && (this.weaponManager.isReloading || this.weaponManager.isSpecialAnimating)) return;
+    const dropped = this.inventoryManager.dropActiveSlotItem();
+    if (!dropped) return;
+
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    forward.y = 0;
+    forward.normalize();
+
+    const dropPos = [
+      this.camera.position.x + forward.x * 1.6,
+      0.02,
+      this.camera.position.z + forward.z * 1.6
+    ];
+
+    try {
+      const res = await ApiClient.dropItemOnGround(dropped.name, dropped.count, dropPos);
+      if (res && res.valid && res.drop && this.onPlayerDropCallback) {
+        this.onPlayerDropCallback(res.drop);
+      }
+    } catch (err) {
+      console.error('Failed to drop item:', err);
+    }
+  }
+
   _bindEvents() {
     this.controls.addEventListener('unlock', () => {
       this.isShooting = false;
@@ -209,7 +259,7 @@ export class Player {
     });
 
     this.canvas.addEventListener('click', () => {
-      if (!this.isDead && !this.controls.isLocked && !this.inventoryManager.isOpen) {
+      if (!this.isDead && !this.controls.isLocked && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
         this.controls.lock();
       }
     });
@@ -220,8 +270,14 @@ export class Player {
         return;
       }
 
+      if (e.code === 'Escape' && this.interactionManager.isLootBoxOpen) {
+        this.interactionManager.closeLootBox();
+        return;
+      }
+
       if (e.code === 'Tab') {
         e.preventDefault();
+        if (this.interactionManager.isLootBoxOpen) this.interactionManager.closeLootBox();
         this.canvas.focus(); 
         this.inventoryManager.toggle();
         return;
@@ -229,9 +285,16 @@ export class Player {
 
       if (e.code === 'KeyE' && !this.inventoryManager.isOpen) {
         this.interactionManager.interact();
+        return;
       }
 
-      if (e.code === 'KeyR' && this.weaponManager) {
+      // [Q] Drops the currently active item/stack onto the street
+      if (e.code === 'KeyQ' && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
+        this._dropEquippedItem();
+        return;
+      }
+
+      if (e.code === 'KeyR' && this.weaponManager && !this.inventoryManager.isOpen) {
         this.weaponManager.reload();
       }
 
@@ -265,7 +328,7 @@ export class Player {
     });
     
     document.addEventListener('mousedown', (e) => {
-      if (this.controls.isLocked && e.button === 0 && !this.isDead && !this.inventoryManager.isOpen) {
+      if (this.controls.isLocked && e.button === 0 && !this.isDead && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
         if (this.equippedItemName && this.consumableConfig[this.equippedItemName]) {
           this._useConsumable(this.equippedItemName);
         } else {
@@ -297,7 +360,7 @@ export class Player {
       if (result && result.valid) {
         this.health = result.newHealth;
         this.lastConsumableUseTime = performance.now();
-        this.inventoryManager.consumeActiveItem();
+        this.inventoryManager.consumeActiveItem(1);
 
         const healFlash = document.createElement('div');
         healFlash.style.cssText = `
@@ -320,7 +383,7 @@ export class Player {
   }
 
   _onKeyChange(code, isPressed) {
-    if (this.isDead || this.inventoryManager.isOpen) return;
+    if (this.isDead || this.inventoryManager.isOpen || this.interactionManager.isLootBoxOpen) return;
     switch (code) {
       case 'KeyW': this.moveState.forward = isPressed; break;
       case 'KeyS': this.moveState.backward = isPressed; break;
@@ -378,7 +441,6 @@ export class Player {
 
   takeDamage(amount) {
     if (this.isDead) return;
-    
     this.health -= amount;
 
     const blood = document.createElement('div');
@@ -406,21 +468,6 @@ export class Player {
         this.actions['Death'].clampWhenFinished = true;
         this.actions['Death'].play();
       }
-
-      const startCamPos = this.camera.position.clone();
-      const backDir = new THREE.Vector3(0, 0, 1).applyQuaternion(this.camera.quaternion);
-      const targetCamPos = startCamPos.clone().add(backDir.multiplyScalar(2.5)).add(new THREE.Vector3(0, 1.2, 0));
-      
-      let camProgress = 0;
-      const deathCamInterval = setInterval(() => {
-        camProgress += 0.02;
-        if (camProgress <= 1.0) {
-          this.camera.position.lerpVectors(startCamPos, targetCamPos, camProgress);
-          if (this.model) this.camera.lookAt(this.model.position.clone().add(new THREE.Vector3(0, 1.0, 0)));
-        } else {
-          clearInterval(deathCamInterval);
-        }
-      }, 16);
     }
   }
 
@@ -449,7 +496,7 @@ export class Player {
     let isPhysicallySprinting = false;
     let currentSpeed = this.baseSpeed;
 
-    if (this.controls.isLocked && !this.isDead && !this.inventoryManager.isOpen) {
+    if (this.controls.isLocked && !this.isDead && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
       const isMovingForward = this.moveState.forward;
       
       if (this.stamina <= 0) {
@@ -510,10 +557,13 @@ export class Player {
         const wName = this.weaponManager.currentWeaponName;
         const wCfg = wName ? this.weaponManager.serverWeapons[wName] : null;
         const consumable = this.equippedItemName ? this.consumableConfig[this.equippedItemName] : null;
+        const ammoItemCfg = this.equippedItemName ? this.ammoConfig[this.equippedItemName] : null;
+        const slotCount = this.inventoryManager.getActiveSlotData()?.count || 0;
         const current = wName ? this.weaponManager.ammoState[wName] : 0;
+        const reserve = (wCfg && wCfg.ammoType) ? this.inventoryManager.getTotalItemCount(wCfg.ammoType) : 0;
         const isReloading = this.weaponManager.isReloading;
         const isSpecialAnim = this.weaponManager.isSpecialAnimating;
-        const hudKey = `${this.equippedItemName}_${wName}_${current}_${isReloading}_${isSpecialAnim}`;
+        const hudKey = `${this.equippedItemName}_${wName}_${current}_${reserve}_${slotCount}_${isReloading}_${isSpecialAnim}`;
 
         if (this._lastHudAmmoKey !== hudKey) {
           this._lastHudAmmoKey = hudKey;
@@ -522,6 +572,11 @@ export class Player {
               this.ammoContainer.innerHTML = `<span style="color: #ffaa00; font-size: 1.4rem;">RELOADING...</span>`;
             } else if (isSpecialAnim) {
               this.ammoContainer.innerHTML = `<span style="color: #ff3366; font-size: 1.4rem;">SHREDDING...</span>`;
+            } else if (wCfg.type === 'throwable') {
+              this.ammoContainer.innerHTML = `
+                <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
+                <span style="color: #33ff66; font-size: 2.0rem;">x${slotCount}</span>
+              `;
             } else if (wCfg.infiniteAmmo) {
               this.ammoContainer.innerHTML = `
                 <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
@@ -530,16 +585,22 @@ export class Player {
             } else {
               const max = wCfg.maxAmmo;
               const color = current <= (max * 0.25) ? '#ff4444' : '#ffffff';
+              const displayMax = wCfg.ammoType ? reserve : max;
               this.ammoContainer.innerHTML = `
                 <span style="font-size: 1rem; color: #aaa;">${wName.toUpperCase()}</span>
                 <span style="color: ${color}; font-size: 2.2rem;">${current}</span> 
-                <span style="color: #666; font-size: 1.2rem;">/ ${max}</span>
+                <span style="color: #888; font-size: 1.2rem;">/ ${displayMax}</span>
               `;
             }
           } else if (consumable) {
             this.ammoContainer.innerHTML = `
-              <span style="font-size: 1rem; color: #33cc33;">${this.equippedItemName.toUpperCase()}</span>
+              <span style="font-size: 1rem; color: #33cc33;">${this.equippedItemName.toUpperCase()} (x${slotCount})</span>
               <span style="color: #fff; font-size: 1.3rem;">+${consumable.healAmount} HP [LMB]</span>
+            `;
+          } else if (ammoItemCfg) {
+            this.ammoContainer.innerHTML = `
+              <span style="font-size: 1rem; color: #ffaa44;">${ammoItemCfg.label.toUpperCase()}</span>
+              <span style="color: #fff; font-size: 1.6rem;">x${slotCount}</span>
             `;
           } else {
             this.ammoContainer.innerHTML = `<span style="color: #aaa; font-size: 1.4rem;">UNARMED</span>`;
@@ -579,7 +640,7 @@ export class Player {
       this.velocity.x -= this.velocity.x * 10.0 * delta;
       this.velocity.z -= this.velocity.z * 10.0 * delta;
 
-      if (this.controls.isLocked && !this.inventoryManager.isOpen) {
+      if (this.controls.isLocked && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
         this.direction.z = Number(this.moveState.forward) - Number(this.moveState.backward);
         this.direction.x = Number(this.moveState.right) - Number(this.moveState.left);
         this.direction.normalize();

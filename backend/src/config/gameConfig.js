@@ -10,13 +10,27 @@ export const gameConfig = {
     staminaRegen: 8.0,
     jumpCost: 20.0
   },
-  startingInventory: ['Pistol', 'Rifle', null, null, null],
+  // Includes RPG, Grenade, and Medkit right in your hotbar/inventory for instant testing
+  startingInventory: [
+    { name: 'Pistol', count: 1 },
+    { name: 'Rifle', count: 1 },
+    { name: 'RPG', count: 1 },
+    { name: 'Grenade', count: 2 },
+    { name: 'Medkit', count: 2 },
+    { name: 'rpg_ammo', count: 5 },
+    { name: 'pistol_ammo', count: 36 },
+    { name: 'assault_ammo', count: 90 },
+    { name: 'smg_ammo', count: 70 },
+    { name: 'shotgun_ammo', count: 24 }
+  ],
   weapons: {
     Pistol: {
       type: 'gun',
       meshName: 'Pistol',
+      modelPath: '/deadzone-assets/Pistol.gltf',
       iconPath: '/custom-png/pistol.png',
       audio: 'pistol',
+      ammoType: 'pistol_ammo',
       damage: 34,
       fireRate: 250,
       range: 60,
@@ -24,13 +38,16 @@ export const gameConfig = {
       reloadTime: 1.2,
       automatic: false,
       pellets: 1,
-      spread: 0.01
+      spread: 0.01,
+      maxStack: 1
     },
     Rifle: {
       type: 'gun',
       meshName: 'Rifle',
+      modelPath: '/deadzone-assets/Rifle.gltf',
       iconPath: '/custom-png/rifle.png',
       audio: 'pistol',
+      ammoType: 'assault_ammo',
       damage: 25,
       fireRate: 110,
       range: 90,
@@ -38,27 +55,33 @@ export const gameConfig = {
       reloadTime: 1.8,
       automatic: true,
       pellets: 1,
-      spread: 0.035
+      spread: 0.035,
+      maxStack: 1
     },
     SMG: {
       type: 'gun',
       meshName: 'SMG',
+      modelPath: '/deadzone-assets/SMG.gltf',
       iconPath: '/custom-png/smg.png',
       audio: 'pistol',
+      ammoType: 'smg_ammo',
       damage: 19,
-      fireRate: 75, // Fast submachine gun rate of fire (single tap or hold for auto)
+      fireRate: 75,
       range: 55,
       maxAmmo: 35,
       reloadTime: 1.5,
       automatic: true,
       pellets: 1,
-      spread: 0.055
+      spread: 0.055,
+      maxStack: 1
     },
     Shotgun: {
       type: 'gun',
       meshName: 'Shotgun',
+      modelPath: '/deadzone-assets/Shotgun.gltf',
       iconPath: '/custom-png/shotgun.png',
       audio: 'shotgun',
+      ammoType: 'shotgun_ammo',
       damage: 18,
       fireRate: 850,
       range: 35,
@@ -66,11 +89,46 @@ export const gameConfig = {
       reloadTime: 2.2,
       automatic: false,
       pellets: 8,
-      spread: 0.12
+      spread: 0.12,
+      maxStack: 1
+    },
+    RPG: {
+      type: 'launcher',
+      meshName: 'RPG',
+      modelPath: '/deadzone-assets/rpg.gltf',
+      iconPath: '/custom-png/rpg.png',
+      audio: 'rpg',
+      blastAudio: 'blast',
+      ammoType: 'rpg_ammo',
+      damage: 9999,
+      blastRadius: 11.0, // Larger blast radius than Grenade; instant-kills all zombies in radius
+      projectileSpeed: 38.0,
+      fireRate: 1200,
+      range: 120,
+      maxAmmo: 1,
+      reloadTime: 2.4,
+      automatic: false,
+      maxStack: 1
+    },
+    Grenade: {
+      type: 'throwable',
+      meshName: 'Grenade',
+      modelPath: '/deadzone-assets/Grenade.gltf',
+      iconPath: '/custom-png/grenade.png',
+      audio: 'grenade',
+      blastAudio: 'blast',
+      damage: 9999,
+      blastRadius: 6.5, // Smaller blast radius than RPG; instant-kills all zombies in radius
+      throwSpeed: 18.0,
+      fuseTime: 2.0,
+      fireRate: 900,
+      automatic: false,
+      maxStack: 3
     },
     Axe: {
       type: 'melee',
       meshName: 'Axe',
+      modelPath: '/deadzone-assets/Axe.gltf',
       iconPath: '/custom-png/axe.png',
       audio: 'axe',
       damage: 65,
@@ -78,11 +136,13 @@ export const gameConfig = {
       range: 3.5,
       infiniteAmmo: true,
       swingDuration: 0.35,
-      automatic: false
+      automatic: false,
+      maxStack: 1
     },
     Bat: {
       type: 'melee',
       meshName: 'WoodenBat_Barbed',
+      modelPath: '/deadzone-assets/WoodenBat_Barbed.gltf',
       iconPath: '/custom-png/woodenbat_barbed.png',
       audio: 'bat_barbed',
       damage: 50,
@@ -90,19 +150,22 @@ export const gameConfig = {
       range: 3.5,
       infiniteAmmo: true,
       swingDuration: 0.3,
-      automatic: false
+      automatic: false,
+      maxStack: 1
     },
     Guitar: {
       type: 'special_melee',
       meshName: 'Guitar',
+      modelPath: '/deadzone-assets/Guitar.gltf',
       iconPath: '/custom-png/guitar.png',
       audio: 'guitar',
-      damage: 9999, // Instant kill
+      damage: 9999,
       fireRate: 4000,
       range: 4.5,
-      maxAmmo: 2, // Can be used twice before breaking/consuming
-      specialDuration: 4.0, // 4-second riff animation
-      automatic: false
+      maxAmmo: 2,
+      specialDuration: 4.0,
+      automatic: false,
+      maxStack: 1
     }
   },
   consumables: {
@@ -111,10 +174,54 @@ export const gameConfig = {
       healAmount: 50,
       useTime: 2.0,
       cooldown: 1.5,
+      maxStack: 2, // 2 Medkits per slot!
       targetSize: 0.45,
       handSize: 0.25,
       modelPath: '/deadzone-assets/medkit.gltf',
       iconPath: '/custom-png/medkit.png'
+    }
+  },
+  ammoItems: {
+    pistol_ammo: {
+      label: 'Pistol Ammo',
+      modelPath: '/deadzone-assets/pistol_ammo.gltf',
+      iconPath: '/custom-png/pistol_ammo.png',
+      targetSize: 0.38,
+      maxStack: 60,
+      defaultPickupCount: 15
+    },
+    assault_ammo: {
+      label: 'Assault Ammo',
+      modelPath: '/deadzone-assets/assault_ammo.gltf',
+      iconPath: '/custom-png/assault_ammo.png',
+      targetSize: 0.42,
+      maxStack: 120,
+      defaultPickupCount: 30
+    },
+    smg_ammo: {
+      label: 'SMG Ammo',
+      // Uses pistol_ammo.gltf if you don't have a separate smg_ammo.gltf file
+      modelPath: '/deadzone-assets/pistol_ammo.gltf',
+      iconPath: '/custom-png/smg_ammo.png',
+      targetSize: 0.38,
+      maxStack: 140,
+      defaultPickupCount: 35
+    },
+    shotgun_ammo: {
+      label: 'Shotgun Ammo',
+      modelPath: '/deadzone-assets/shotgun_ammo.gltf',
+      iconPath: '/custom-png/shotgun_ammo.png',
+      targetSize: 0.38,
+      maxStack: 32,
+      defaultPickupCount: 8
+    },
+    rpg_ammo: {
+      label: 'RPG Rockets',
+      modelPath: '/deadzone-assets/rpg_ammo.gltf',
+      iconPath: '/custom-png/rpg_ammo.png',
+      targetSize: 0.65,
+      maxStack: 6,
+      defaultPickupCount: 2
     }
   },
   zombies: {
@@ -122,51 +229,8 @@ export const gameConfig = {
       health: 100,
       speed: 4.2,
       damage: 15,
-      attackCooldown: 1200
+      attackCooldown: 1200,
+      corpseCleanupDelay: 5.0 // Destroy dead zombie meshes after 5s to save RAM
     }
-  },
-  worldLoot: [
-    {
-      itemName: 'Axe',
-      modelPath: '/deadzone-assets/Axe.gltf',
-      position: [-5.0, 0.1, -4],
-      rotationY: 0,
-      targetSize: 0.85
-    },
-    {
-      itemName: 'SMG',
-      modelPath: '/deadzone-assets/SMG.gltf',
-      position: [-3.0, 0.1, -4],
-      rotationY: Math.PI / 2,
-      targetSize: 0.75
-    },
-    {
-      itemName: 'Shotgun',
-      modelPath: '/deadzone-assets/Shotgun.gltf',
-      position: [-1.0, 0.1, -4],
-      rotationY: Math.PI / 2,
-      targetSize: 0.95
-    },
-    {
-      itemName: 'Medkit',
-      modelPath: '/deadzone-assets/medkit.gltf',
-      position: [1.0, 0.1, -4],
-      rotationY: 0,
-      targetSize: 0.45
-    },
-    {
-      itemName: 'Bat',
-      modelPath: '/deadzone-assets/WoodenBat_Barbed.gltf',
-      position: [3.0, 0.1, -4],
-      rotationY: 0,
-      targetSize: 0.90
-    },
-    {
-      itemName: 'Guitar',
-      modelPath: '/deadzone-assets/Guitar.gltf',
-      position: [5.0, 0.1, -4],
-      rotationY: 0,
-      targetSize: 1.05
-    }
-  ]
+  }
 };
