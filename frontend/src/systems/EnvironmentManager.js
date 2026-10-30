@@ -12,7 +12,6 @@ export class EnvironmentManager {
     this.scene.add(this.ambientLight);
 
     this.sunLight = new THREE.DirectionalLight(0xffeedd, 2.0);
-    // CRITICAL FIX: Never toggle castShadow at runtime; keep it true to prevent WebGL shadow sampler crashes
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.width = 1024;
     this.sunLight.shadow.mapSize.height = 1024;
@@ -40,7 +39,6 @@ export class EnvironmentManager {
     this.bulbMaterials = new Set();
     this.nightFactor = 0;
 
-    // 2 pooled PointLights is plenty alongside the custom GLSL ground shader and saves half the fragment cost
     this.maxActiveLights = 2;
     this.lightPool = [];
     for (let i = 0; i < this.maxActiveLights; i++) {
@@ -68,7 +66,6 @@ export class EnvironmentManager {
     const px = playerPosition ? playerPosition.x : 0;
     const pz = playerPosition ? playerPosition.z : 0;
 
-    // Keep shadow frustum centered on player for crisp shadows with a smaller 1024 map
     this.sunLight.position.set(
       px + Math.cos(timeAngle) * 60,
       Math.max(5, sunHeight * 70),
@@ -93,13 +90,11 @@ export class EnvironmentManager {
     const targetNightFactor = isNight ? 1.0 : 0.0;
     this.nightFactor += (targetNightFactor - this.nightFactor) * Math.min(1, delta * 3);
 
-    // Update custom GLSL shader uniform & emissive bulbs
     shaderPipeline.updateNightFactor(this.nightFactor);
     this.bulbMaterials.forEach(mat => {
       mat.emissiveIntensity = this.nightFactor * 3.0;
     });
 
-    // Throttle lamp distance sorting to 5 times per second instead of 60 FPS
     this._lampSortTimer += delta;
     if (playerPosition && this.streetLamps.length > 0 && this._lampSortTimer > 0.2) {
       this._lampSortTimer = 0;

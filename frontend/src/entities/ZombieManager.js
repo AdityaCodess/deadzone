@@ -5,15 +5,17 @@ import { shaderPipeline } from '../systems/ShaderPipeline.js';
 import { ApiClient } from '../services/apiClient.js';
 
 export class ZombieManager {
-  constructor(scene, playerCamera, serverZombies, audioManager, worldGenerator, onZombieDropCallback) {
+  constructor(scene, playerCamera, serverZombies, audioManager, worldGenerator, onZombieDropCallback, networkManager) {
     this.scene = scene;
     this.playerCamera = playerCamera;
     this.serverZombies = serverZombies;
     this.audioManager = audioManager;
     this.worldGenerator = worldGenerator;
     this.onZombieDropCallback = onZombieDropCallback;
+    this.networkManager = networkManager;
 
     this.zombies = [];
+    this.zombieMap = new Map();
     this.mixers = [];
     this._targetPos = new THREE.Vector3();
     this._zombieBox = new THREE.Box3();
@@ -23,9 +25,10 @@ export class ZombieManager {
     this.baseGltf = null;
     this.groundYOffset = 0;
     this.loader = new GLTFLoader();
+    this.isClientOnly = false;
   }
 
-  async spawnZombie(position = new THREE.Vector3(0, 0, -14)) {
+  async initBaseModel() {
     if (!this.baseGltf) {
       this.baseGltf = await new Promise((resolve, reject) => {
         this.loader.load('/deadzone-assets/Zombie_Basic.gltf', (gltf) => {
@@ -36,6 +39,10 @@ export class ZombieManager {
         }, undefined, reject);
       });
     }
+  }
+
+  async spawnZombie(position = new THREE.Vector3(0, 0, -14), customId = null) {
+    await this.initBaseModel();
 
     const zombie = SkeletonUtils.clone(this.baseGltf.scene);
     zombie.position.set(position.x, this.groundYOffset, position.z);
@@ -48,17 +55,20 @@ export class ZombieManager {
       actions[clip.name] = mixer.clipAction(clip);
     });
 
+    const id = customId || THREE.MathUtils.generateUUID();
     zombie.userData = { 
-      id: THREE.MathUtils.generateUUID(),
+      id,
       isZombie: true, 
       health: this.serverZombies.basic.health, 
       state: 'alive',
       currentAction: 'Run',
-      actions: actions,
-      mixer: mixer,
+      actions,
+      mixer,
       attackWindupUntil: 0,
       lastAttackTime: 0,
-      deathTimestamp: 0
+      deathTimestamp: 0,
+      targetPos: new THREE.Vector3(position.x, this.groundYOffset, position.z),
+      targetRotY: 0
     };
 
     zombie.traverse((child) => {
@@ -72,13 +82,22 @@ export class ZombieManager {
 
     this.scene.add(zombie);
     this.zombies.push(zombie);
+    this.zombieMap.set(id, zombie);
+    return zombie;
   }
 
   takeDamage(zombie, amount) {
     if (!zombie || zombie.userData.state === 'dead') return;
 
-    zombie.userData.health -= amount;
+    if (this.isClientOnly && this.networkManager) {
+      this.networkManager.socket?.emit('z:hit', {
+        zombieId: zombie.userData.id,
+        damage: amount
+      });
+      return;
+    }
 
+    zombie.userData.health -= amount;
     if (zombie.userData.health <= 0) {
       this.killZombie(zombie);
     }
@@ -95,9 +114,7 @@ export class ZombieManager {
     }
 
     zombie.traverse((child) => {
-      if (child.isMesh) {
-        child.userData.isZombieMesh = false;
-      }
+      if (child.isMesh) child.userData.isZombieMesh = false;
     });
 
     const actions = zombie.userData.actions;
@@ -113,19 +130,73 @@ export class ZombieManager {
       zombie.position.y = this.groundYOffset;
     }
 
-    // Request authoritative loot drop from server at the zombie's death location
-    const deathPos = [zombie.position.x, 0.02, zombie.position.z];
-    ApiClient.requestZombieLoot(deathPos).then((res) => {
-      if (res && res.valid && res.drop && this.onZombieDropCallback) {
-        this.onZombieDropCallback(res.drop);
+    if (!this.isClientOnly) {
+      const deathPos = [zombie.position.x, 0.02, zombie.position.z];
+      ApiClient.requestZombieLoot(deathPos).then((res) => {
+        if (res?.valid && res.drop && this.onZombieDropCallback) {
+          this.onZombieDropCallback(res.drop);
+        }
+      }).catch(() => {});
+    }
+  }
+
+  // Listens directly to the backend Colyseus Schema
+  syncFromSchema(zombieId, zState) {
+    let zombie = this.zombieMap.get(zombieId);
+
+    if (!zombie) {
+      this.spawnZombie(new THREE.Vector3(zState.x, 0, zState.z), zombieId);
+      return;
+    }
+
+    zombie.userData.targetPos.set(zState.x, this.groundYOffset, zState.z);
+    zombie.userData.targetRotY = zState.rotY;
+
+    if (zState.state === 'dead' && zombie.userData.state !== 'dead') {
+      this.killZombie(zombie);
+    } else if (zState.state !== 'dead') {
+      const action = zState.state || 'Run';
+      const actions = zombie.userData.actions;
+      
+      if (action !== zombie.userData.currentAction && actions[action]) {
+        if (actions[zombie.userData.currentAction]) actions[zombie.userData.currentAction].fadeOut(0.15);
+        actions[action].reset().fadeIn(0.15).play();
+        zombie.userData.currentAction = action;
       }
-    }).catch(() => {});
+    }
+  }
+
+  removeZombie(zombieId) {
+    const zombie = this.zombieMap.get(zombieId);
+    if (!zombie) return;
+    const index = this.zombies.indexOf(zombie);
+    if (index !== -1) this._destroyZombieCorpse(index);
+  }
+
+  // Host serializes objects properly into an object array for the backend to ingest
+  serializeForNetwork() {
+    const list = [];
+    for (let i = 0; i < this.zombies.length; i++) {
+      const z = this.zombies[i];
+      list.push({
+        id: z.userData.id,
+        position: [
+          Math.round(z.position.x * 100) / 100,
+          Math.round(z.position.y * 100) / 100,
+          Math.round(z.position.z * 100) / 100
+        ],
+        rotationY: Math.round(z.rotation.y * 100) / 100,
+        state: z.userData.state === 'dead' ? 'dead' : z.userData.currentAction
+      });
+    }
+    return list;
   }
 
   _destroyZombieCorpse(index) {
     const zombie = this.zombies[index];
     if (!zombie) return;
 
+    this.zombieMap.delete(zombie.userData.id);
     const mixer = zombie.userData.mixer;
     if (mixer) {
       mixer.stopAllAction();
@@ -138,129 +209,101 @@ export class ZombieManager {
     this.zombies.splice(index, 1);
   }
 
-  _isBlockedByWall(x, z) {
-    if (!this.worldGenerator) return false;
-    const r = 0.45;
-    this._zMin.set(x - r, 0, z - r);
-    this._zMax.set(x + r, 2.0, z + r);
-    this._zombieBox.set(this._zMin, this._zMax);
-    return this.worldGenerator.checkCollision(this._zombieBox, x, z);
-  }
-
-  update(delta, player) {
+  update(delta, player, allPlayersPos = []) {
     const config = this.serverZombies.basic; 
     const cleanupDelayMs = (config.corpseCleanupDelay || 5.0) * 1000;
     const now = performance.now();
 
+    if (this.isClientOnly) {
+      const factor = Math.min(1, delta * 15);
+      for (let i = this.zombies.length - 1; i >= 0; i--) {
+        const z = this.zombies[i];
+        z.userData.mixer.update(delta);
+
+        if (z.userData.state === 'dead') {
+          const elapsed = now - z.userData.deathTimestamp;
+          if (elapsed > cleanupDelayMs - 1000) z.position.y -= delta * 0.6;
+          if (elapsed >= cleanupDelayMs) this._destroyZombieCorpse(i);
+          continue;
+        }
+
+        z.position.lerp(z.userData.targetPos, factor);
+        let diff = z.userData.targetRotY - z.rotation.y;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        z.rotation.y += diff * factor;
+      }
+      return;
+    }
+
     for (let i = this.zombies.length - 1; i >= 0; i--) {
       const zombie = this.zombies[i];
-      
-      const distSqToCam = zombie.position.distanceToSquared(this.playerCamera.position);
-      if (distSqToCam < 6400) {
-        zombie.userData.mixer.update(delta);
-      }
+      zombie.userData.mixer.update(delta);
 
-      // CORPSE RAM CLEANUP: Sink dead body at 4s and completely destroy it at 5s (Wave respawning paused)
       if (zombie.userData.state === 'dead') {
-        const elapsedDead = now - zombie.userData.deathTimestamp;
-        if (elapsedDead > cleanupDelayMs - 1000) {
-          zombie.position.y -= delta * 0.6;
-        }
-        if (elapsedDead >= cleanupDelayMs) {
-          this._destroyZombieCorpse(i);
-        }
+        const elapsed = now - zombie.userData.deathTimestamp;
+        if (elapsed > cleanupDelayMs - 1000) zombie.position.y -= delta * 0.6;
+        if (elapsed >= cleanupDelayMs) this._destroyZombieCorpse(i);
         continue;
       }
 
       zombie.position.y = this.groundYOffset;
       const actions = zombie.userData.actions;
 
-      if (player && player.isDead) {
-        if (this.audioManager) {
-          this.audioManager.stopEntityLoop(zombie.userData.id);
+      let nearestTarget = this.playerCamera.position;
+      let minDistance = Math.hypot(nearestTarget.x - zombie.position.x, nearestTarget.z - zombie.position.z);
+
+      for (const pPos of allPlayersPos) {
+        const d = Math.hypot(pPos.x - zombie.position.x, pPos.z - zombie.position.z);
+        if (d < minDistance) {
+          minDistance = d;
+          nearestTarget = pPos;
         }
-        const idleAction = actions['Idle'] || actions['Stand'] || actions['Run'];
-        if (zombie.userData.currentAction !== 'Idle' && idleAction) {
-          if (actions[zombie.userData.currentAction]) actions[zombie.userData.currentAction].fadeOut(0.3);
-          idleAction.reset().fadeIn(0.3).play();
-          zombie.userData.currentAction = 'Idle';
-        }
-        continue; 
       }
 
-      if (zombie.userData.state === 'alive') {
-        const px = this.playerCamera.position.x;
-        const pz = this.playerCamera.position.z;
-        this._targetPos.set(px, zombie.position.y, pz);
+      const dx = nearestTarget.x - zombie.position.x;
+      const dz = nearestTarget.z - zombie.position.z;
+      this._targetPos.set(nearestTarget.x, zombie.position.y, nearestTarget.z);
+      zombie.lookAt(this._targetPos);
 
-        const dx = px - zombie.position.x;
-        const dz = pz - zombie.position.z;
-        const distance = Math.hypot(dx, dz);
+      const minSeparation = 1.35;
+      if (minDistance < minSeparation && minDistance > 0.001) {
+        const pushBack = minSeparation - minDistance;
+        zombie.position.x -= (dx / minDistance) * pushBack;
+        zombie.position.z -= (dz / minDistance) * pushBack;
+      }
 
-        if (this.audioManager) {
-          this.audioManager.updateEntityLoop(zombie.userData.id, 'zombie', distance, 25, 0.3);
+      const isSwinging = now < zombie.userData.attackWindupUntil;
+      const attackRange = 1.85;
+
+      if (minDistance > attackRange && !isSwinging) {
+        const step = Math.min(config.speed * delta, minDistance - minSeparation);
+        if (step > 0) {
+          zombie.position.x += (dx / minDistance) * step;
+          zombie.position.z += (dz / minDistance) * step;
+        }
+        if (zombie.userData.currentAction !== 'Run') {
+          if (actions['Run'] && actions[zombie.userData.currentAction]) {
+            actions['Run'].reset().fadeIn(0.2);
+            actions[zombie.userData.currentAction].fadeOut(0.2);
+            actions['Run'].play();
+          }
+          zombie.userData.currentAction = 'Run';
+        }
+      } else {
+        const atkClip = actions['Attack'] ? 'Attack' : 'Run';
+        if (zombie.userData.currentAction !== atkClip && actions[atkClip]) {
+          actions[atkClip].reset().fadeIn(0.2).play();
+          if (actions[zombie.userData.currentAction]) actions[zombie.userData.currentAction].fadeOut(0.2);
+          zombie.userData.currentAction = atkClip;
         }
 
-        zombie.lookAt(this._targetPos);
-
-        const minSeparation = 1.35;
-        if (distance < minSeparation && distance > 0.001) {
-          const pushBack = minSeparation - distance;
-          const nx = dx / distance;
-          const nz = dz / distance;
-          const pushedX = zombie.position.x - nx * pushBack;
-          const pushedZ = zombie.position.z - nz * pushBack;
-          if (!this._isBlockedByWall(pushedX, pushedZ)) {
-            zombie.position.x = pushedX;
-            zombie.position.z = pushedZ;
+        if (minDistance <= attackRange + 0.3 && now - zombie.userData.lastAttackTime > config.attackCooldown) {
+          if (nearestTarget === this.playerCamera.position && player && !player.isDead) {
+            player.takeDamage(config.damage);
           }
-        }
-
-        const isSwingingAttack = now < zombie.userData.attackWindupUntil;
-        const attackRange = 1.85;
-
-        if (distance > attackRange && !isSwingingAttack) {
-          const step = Math.min(config.speed * delta, distance - minSeparation);
-          if (step > 0) {
-            const dirX = dx / distance;
-            const dirZ = dz / distance;
-            const nextX = zombie.position.x + dirX * step;
-            const nextZ = zombie.position.z + dirZ * step;
-
-            if (!this._isBlockedByWall(nextX, zombie.position.z)) {
-              zombie.position.x = nextX;
-            }
-            if (!this._isBlockedByWall(zombie.position.x, nextZ)) {
-              zombie.position.z = nextZ;
-            }
-          }
-
-          if (zombie.userData.currentAction !== 'Run') {
-            if (actions['Run'] && actions[zombie.userData.currentAction]) {
-              actions['Run'].reset().fadeIn(0.2);
-              actions[zombie.userData.currentAction].fadeOut(0.2);
-              actions['Run'].play();
-            }
-            zombie.userData.currentAction = 'Run';
-          }
-        } else {
-          const attackClipName = actions['Attack'] ? 'Attack' : (actions['Punch'] ? 'Punch' : 'Run');
-          if (zombie.userData.currentAction !== attackClipName) {
-            if (actions[attackClipName] && actions[zombie.userData.currentAction]) {
-              actions[attackClipName].reset().fadeIn(0.2);
-              actions[zombie.userData.currentAction].fadeOut(0.2);
-              actions[attackClipName].play();
-            }
-            zombie.userData.currentAction = attackClipName;
-          }
-
-          if (player && !player.isDead && distance <= attackRange + 0.3) {
-            if (now - zombie.userData.lastAttackTime > config.attackCooldown) {
-              player.takeDamage(config.damage);
-              zombie.userData.lastAttackTime = now;
-              zombie.userData.attackWindupUntil = now + 650;
-            }
-          }
+          zombie.userData.lastAttackTime = now;
+          zombie.userData.attackWindupUntil = now + 650;
         }
       }
     }

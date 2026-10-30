@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { shaderPipeline } from '../systems/ShaderPipeline.js';
 
 const CHAR_PATHS = {
@@ -15,64 +16,78 @@ export class RemotePlayerManager {
   constructor(scene) {
     this.scene = scene;
     this.loader = new GLTFLoader();
-    this.remotePlayers = new Map(); // socketId -> { root, mixer, actions, currentAction, equippedWeapon }
+    this.gltfCache = new Map();
+    this.remotePlayers = new Map();
+    this.pendingSpawns = new Set();
   }
 
   async spawnRemotePlayers(playersList, localSocketId) {
-    for (const p of playersList) {
-      if (p.socketId === localSocketId) continue;
-      await this.addOrUpdatePlayer(p);
-    }
+    const promises = playersList
+      .filter(p => p.socketId !== localSocketId)
+      .map(p => this.addOrUpdatePlayer(p));
+    await Promise.all(promises);
+  }
+
+  async _loadCharGltf(characterName) {
+    const key = CHAR_PATHS[characterName] ? characterName : 'Matt';
+    if (this.gltfCache.has(key)) return this.gltfCache.get(key);
+
+    return new Promise((resolve) => {
+      this.loader.load(CHAR_PATHS[key], (gltf) => {
+        shaderPipeline.optimizeModel(gltf.scene, false, true);
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        gltf.userData = { footYOffset: -box.min.y };
+        this.gltfCache.set(key, gltf);
+        resolve(gltf);
+      }, undefined, () => resolve(null));
+    });
   }
 
   async addOrUpdatePlayer(playerInfo) {
-    if (this.remotePlayers.has(playerInfo.socketId)) return;
+    if (this.remotePlayers.has(playerInfo.socketId) || this.pendingSpawns.has(playerInfo.socketId)) return;
+    this.pendingSpawns.add(playerInfo.socketId);
 
-    const modelPath = CHAR_PATHS[playerInfo.character] || CHAR_PATHS.Matt;
-    return new Promise((resolve) => {
-      this.loader.load(modelPath, (gltf) => {
-        const model = gltf.scene;
-        shaderPipeline.optimizeModel(model, true, true);
+    const gltf = await this._loadCharGltf(playerInfo.character);
+    this.pendingSpawns.delete(playerInfo.socketId);
+    if (!gltf) return;
 
-        const box = new THREE.Box3().setFromObject(model);
-        const footYOffset = -box.min.y;
+    const model = SkeletonUtils.clone(gltf.scene);
+    const footYOffset = gltf.userData.footYOffset || 0;
 
-        EMBEDDED_WEAPONS.forEach(w => {
-          const m = model.getObjectByName(w);
-          if (m) m.visible = false;
-        });
+    const weaponMap = {};
+    EMBEDDED_WEAPONS.forEach(w => {
+      const m = model.getObjectByName(w);
+      if (m) {
+        m.visible = (w === 'Pistol');
+        weaponMap[w] = m;
+      }
+    });
 
-        const pistol = model.getObjectByName('Pistol');
-        if (pistol) pistol.visible = true;
+    const mixer = new THREE.AnimationMixer(model);
+    const actions = {};
+    gltf.animations.forEach(clip => {
+      actions[clip.name] = mixer.clipAction(clip);
+    });
+    if (actions['Idle_Gun']) actions['Idle_Gun'].play();
 
-        const mixer = new THREE.AnimationMixer(model);
-        const actions = {};
-        gltf.animations.forEach(clip => {
-          actions[clip.name] = mixer.clipAction(clip);
-        });
-        if (actions['Idle_Gun']) actions['Idle_Gun'].play();
+    const [x, y, z] = playerInfo.position || [0, 1.6, 0];
+    model.position.set(x, (y - 1.6) + footYOffset, z);
 
-        const [x, y, z] = playerInfo.position || [0, 1.6, 0];
-        model.position.set(x, (y - 1.6) + footYOffset, z);
+    const tagSprite = this._createNameTag(playerInfo.username || 'Operative');
+    tagSprite.position.set(0, 2.15, 0);
+    model.add(tagSprite);
 
-        // Floating username nametag sprite
-        const tagSprite = this._createNameTag(playerInfo.username || 'Survivor');
-        tagSprite.position.set(0, 2.15, 0);
-        model.add(tagSprite);
-
-        this.scene.add(model);
-        this.remotePlayers.set(playerInfo.socketId, {
-          root: model,
-          footYOffset,
-          mixer,
-          actions,
-          currentAction: 'Idle_Gun',
-          equippedWeapon: 'Pistol',
-          targetPos: new THREE.Vector3(x, (y - 1.6) + footYOffset, z),
-          targetRotY: playerInfo.rotationY || 0
-        });
-        resolve();
-      }, undefined, () => resolve());
+    this.scene.add(model);
+    this.remotePlayers.set(playerInfo.socketId, {
+      root: model,
+      footYOffset,
+      weaponMap,
+      mixer,
+      actions,
+      currentAction: 'Idle_Gun',
+      equippedWeapon: 'Pistol',
+      targetPos: new THREE.Vector3(x, (y - 1.6) + footYOffset, z),
+      targetRotY: playerInfo.rotationY || 0
     });
   }
 
@@ -96,8 +111,18 @@ export class RemotePlayerManager {
   }
 
   onNetworkMove(data) {
-    const rp = this.remotePlayers.get(data.socketId);
-    if (!rp) return;
+    let rp = this.remotePlayers.get(data.socketId);
+
+    if (!rp) {
+      this.addOrUpdatePlayer({
+        socketId: data.socketId,
+        character: 'Matt',
+        username: 'Operative',
+        position: data.position,
+        rotationY: data.rotationY
+      });
+      return;
+    }
 
     const [x, y, z] = data.position;
     rp.targetPos.set(x, (y - 1.6) + rp.footYOffset, z);
@@ -115,14 +140,10 @@ export class RemotePlayerManager {
 
     if (data.equippedWeapon !== rp.equippedWeapon) {
       rp.equippedWeapon = data.equippedWeapon;
-      EMBEDDED_WEAPONS.forEach(w => {
-        const m = rp.root.getObjectByName(w);
-        if (m) m.visible = false;
-      });
+      Object.values(rp.weaponMap).forEach(m => { m.visible = false; });
       const meshName = data.equippedWeapon === 'Bat' ? 'WoodenBat_Barbed' : data.equippedWeapon;
-      if (meshName) {
-        const activeMesh = rp.root.getObjectByName(meshName);
-        if (activeMesh) activeMesh.visible = true;
+      if (meshName && rp.weaponMap[meshName]) {
+        rp.weaponMap[meshName].visible = true;
       }
     }
   }
@@ -131,15 +152,27 @@ export class RemotePlayerManager {
     const rp = this.remotePlayers.get(socketId);
     if (!rp) return;
     rp.mixer.stopAllAction();
+    rp.mixer.uncacheRoot(rp.root);
     this.scene.remove(rp.root);
     this.remotePlayers.delete(socketId);
   }
 
   update(delta) {
+    const lerpFactor = Math.min(1, delta * 18);
     this.remotePlayers.forEach((rp) => {
       rp.mixer.update(delta);
-      rp.root.position.lerp(rp.targetPos, Math.min(1, delta * 12));
-      rp.root.rotation.y = rp.targetRotY;
+
+      // Deadband: Only lerp position if distance > 1cm to kill idle jitter
+      if (rp.root.position.distanceToSquared(rp.targetPos) > 0.0001) {
+        rp.root.position.lerp(rp.targetPos, lerpFactor);
+      }
+
+      let diff = rp.targetRotY - rp.root.rotation.y;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      if (Math.abs(diff) > 0.002) {
+        rp.root.rotation.y += diff * lerpFactor;
+      }
     });
   }
 }

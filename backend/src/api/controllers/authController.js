@@ -102,7 +102,6 @@ export const verifyAuthOTP = async (req, res, next) => {
 };
 
 // Option B: Google OAuth Login
-// Replace googleAuthLogin in backend/src/api/controllers/authController.js:
 export const googleAuthLogin = async (req, res, next) => {
   try {
     const { accessToken, credential } = req.body;

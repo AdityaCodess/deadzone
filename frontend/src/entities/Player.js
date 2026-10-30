@@ -8,7 +8,7 @@ import { shaderPipeline } from '../systems/ShaderPipeline.js';
 import { ApiClient } from '../services/apiClient.js';
 
 export class Player {
-  constructor(scene, camera, canvas, playerConfig, weaponConfig, consumableConfig, ammoConfig, zombieManager, startingInventory, worldGenerator, audioManager, onPlayerDropCallback) {
+  constructor(scene, camera, canvas, playerConfig, weaponConfig, consumableConfig, ammoConfig, zombieManager, startingInventory, worldGenerator, audioManager, onPlayerDropCallback, launchOptions = {}) {
     this.scene = scene;
     this.camera = camera;
     this.canvas = canvas;
@@ -19,6 +19,7 @@ export class Player {
     this.worldGenerator = worldGenerator;
     this.audioManager = audioManager;
     this.onPlayerDropCallback = onPlayerDropCallback;
+    this.launchOptions = launchOptions; // Stored to check multiplayer mode
    
     this.controls = new PointerLockControls(this.camera, this.canvas);
     this.controls.maxPolarAngle = Math.PI - 0.6;
@@ -69,7 +70,6 @@ export class Player {
     this._lastHudAmmoKey = '';
     this._lastHudHealth = -1;
 
-    // Build unified icon & stack limit dictionaries from backend config
     const itemIcons = {};
     const maxStacks = {};
     for (const [name, cfg] of Object.entries(this.weaponConfig || {})) {
@@ -252,11 +252,6 @@ export class Player {
   }
 
   _bindEvents() {
-    // Inside keydown event listener in Player.js or GameEngine.js for multiplayer:
-    if (this.launchOptions?.mode === 'multi' && e.code === 'Escape') {
-      e.preventDefault();
-      return; // Disables pausing / unlocking during online matches!
-    }
     this.controls.addEventListener('unlock', () => {
       this.isShooting = false;
       this.isSprintingInput = false;
@@ -273,6 +268,12 @@ export class Player {
       if (this.isDead) {
         if (e.code === 'KeyR') window.location.reload();
         return;
+      }
+
+      // Safely check multiplayer Escape pause logic here where 'e' exists
+      if (this.launchOptions?.mode === 'multi' && e.code === 'Escape') {
+        e.preventDefault();
+        return; 
       }
 
       if (e.code === 'Escape' && this.interactionManager.isLootBoxOpen) {
@@ -293,7 +294,6 @@ export class Player {
         return;
       }
 
-      // [Q] Drops the currently active item/stack onto the street
       if (e.code === 'KeyQ' && !this.inventoryManager.isOpen && !this.interactionManager.isLootBoxOpen) {
         this._dropEquippedItem();
         return;

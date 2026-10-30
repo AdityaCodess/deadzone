@@ -15,7 +15,9 @@ export class GameEngine {
   constructor(canvas, launchOptions = {}) {
     this.canvas = canvas;
     this.launchOptions = launchOptions;
+    this.isMultiplayer = launchOptions.mode === 'multi';
     this.isDisposed = false;
+    this.isMatchReady = !this.isMultiplayer;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x111111);
@@ -46,7 +48,40 @@ export class GameEngine {
     this.worldGenerator = new WorldGenerator(this.scene, this.environmentManager);
     this._camEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
+    this._buildLoadingBarrierUI();
     this._bindEvents();
+  }
+
+  _buildLoadingBarrierUI() {
+    document.querySelectorAll('#dz-match-loading').forEach(el => el.remove());
+    this.loadingOverlay = document.createElement('div');
+    this.loadingOverlay.id = 'dz-match-loading';
+    this.loadingOverlay.style.cssText = `
+      position: fixed; inset: 0; background: #0c0e12; z-index: 3000;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      font-family: monospace; color: #fff; gap: 16px; transition: opacity 0.4s ease;
+    `;
+    this.loadingStatusText = document.createElement('div');
+    this.loadingStatusText.style.cssText = `color: #ffaa44; font-size: 1.4rem; letter-spacing: 3px; font-weight: bold;`;
+    this.loadingStatusText.innerText = 'LOADING ASSETS...';
+
+    this.loadingSubText = document.createElement('div');
+    this.loadingSubText.style.cssText = `color: #888; font-size: 0.95rem;`;
+    this.loadingSubText.innerText = this.isMultiplayer
+      ? 'Connecting with squad...'
+      : 'Generating sector...';
+
+    this.loadingOverlay.appendChild(this.loadingStatusText);
+    this.loadingOverlay.appendChild(this.loadingSubText);
+    document.body.appendChild(this.loadingOverlay);
+  }
+
+  _hideLoadingBarrierUI() {
+    this.isMatchReady = true;
+    if (this.loadingOverlay) {
+      this.loadingOverlay.style.opacity = '0';
+      setTimeout(() => this.loadingOverlay?.remove(), 400);
+    }
   }
 
   async init() {
@@ -58,6 +93,8 @@ export class GameEngine {
       const chosenChar = this.launchOptions.character || 'Matt';
       const charModelPath = gameConfig.characters?.[chosenChar]?.modelPath || `/deadzone-assets/Characters_${chosenChar}.gltf`;
 
+      const isHost = !this.isMultiplayer || networkManager.isHost();
+
       this.zombieManager = new ZombieManager(
         this.scene,
         this.camera,
@@ -66,9 +103,11 @@ export class GameEngine {
         this.worldGenerator,
         (dropData) => {
           this.spawnSingleGroundDrop(dropData);
-          networkManager.notifyItemDropped(dropData);
-        }
+          if (this.isMultiplayer) networkManager.notifyItemDropped(dropData);
+        },
+        networkManager
       );
+      this.zombieManager.isClientOnly = this.isMultiplayer && !isHost;
 
       this.player = new Player(
         this.scene,
@@ -84,9 +123,14 @@ export class GameEngine {
         this.audioManager,
         (dropData) => {
           this.spawnSingleGroundDrop(dropData);
-          networkManager.notifyItemDropped(dropData);
-        }
+          if (this.isMultiplayer) networkManager.notifyItemDropped(dropData);
+        },
+        this.launchOptions // Pass launchOptions to Player for Mode checks
       );
+
+      if (this.isMultiplayer && this.launchOptions.room) {
+        this._setupMultiplayerSync(this.launchOptions.room);
+      }
       
       try {
         await Promise.all([
@@ -96,22 +140,27 @@ export class GameEngine {
           this._spawnAuthoritativeWorldLoot(activeWorldState)
         ]);
 
-        if (this.launchOptions.mode === 'multi' && this.launchOptions.room) {
-          this._setupMultiplayerSync(this.launchOptions.room);
-          await this.remotePlayerManager.spawnRemotePlayers(
-            this.launchOptions.room.players,
-            networkManager.socket?.id
-          );
+        if (this.isMultiplayer && this.launchOptions.room) {
+          const playersArray = Array.from(this.launchOptions.room.state.players.entries()).map(([id, p]) => ({
+            socketId: id,
+            character: p.character,
+            username: p.username,
+            position: [p.x, p.y, p.z],
+            rotationY: p.rotY
+          }));
+          await this.remotePlayerManager.spawnRemotePlayers(playersArray, networkManager.room?.sessionId);
         }
 
-        await this.zombieManager.spawnZombie(new THREE.Vector3(-1.5, 0, -18));
-        await this.zombieManager.spawnZombie(new THREE.Vector3(1.5, 0, -18));
-        for (let i = 0; i < 6; i++) {
-          const roadPos = this.worldGenerator.getRandomRoadPosition(25, 90);
-          await this.zombieManager.spawnZombie(roadPos);
+        if (isHost) {
+          await this.zombieManager.spawnZombie(new THREE.Vector3(-1.5, 0, -18));
+          await this.zombieManager.spawnZombie(new THREE.Vector3(1.5, 0, -18));
+          for (let i = 0; i < 6; i++) {
+            const roadPos = this.worldGenerator.getRandomRoadPosition(25, 90);
+            await this.zombieManager.spawnZombie(roadPos);
+          }
         }
       } catch (assetError) {
-        console.error("ASSET LOADING FAILED, but starting engine anyway:", assetError);
+        console.error("ASSET LOADING FAILED:", assetError);
       }
 
       if (this.isDisposed) return;
@@ -123,59 +172,89 @@ export class GameEngine {
       );
 
       this.renderer.setAnimationLoop((time) => this._gameLoop(time));
-    } catch (error) {
-      if (!this.isDisposed) {
-        console.error("CRITICAL ENGINE FAILURE:", error);
+
+      if (this.isMultiplayer) {
+        this.loadingStatusText.innerText = 'WAITING FOR SQUAD MEMBERS...';
+        networkManager.notifyPlayerLoaded();
+        setTimeout(() => {
+          if (!this.isMatchReady) this._hideLoadingBarrierUI();
+        }, 12000);
+      } else {
+        this._hideLoadingBarrierUI();
       }
+    } catch (error) {
+      if (!this.isDisposed) console.error("CRITICAL ENGINE FAILURE:", error);
     }
   }
 
   _setupMultiplayerSync(room) {
-    const myPlayer = room.players.find(p => p.socketId === networkManager.socket?.id);
-    if (myPlayer && myPlayer.position) {
-      this.camera.position.set(myPlayer.position[0], 1.6, myPlayer.position[2]);
+    const myPlayer = room.state.players.get(networkManager.room?.sessionId);
+    if (myPlayer && myPlayer.x !== undefined) {
+      this.camera.position.set(myPlayer.x, 1.6, myPlayer.z);
     }
 
-    networkManager.onRemotePlayerMoved = (data) => {
-      this.remotePlayerManager.onNetworkMove(data);
-    };
-    networkManager.onRemotePlayerLeft = (socketId) => {
-      this.remotePlayerManager.removePlayer(socketId);
-    };
-    networkManager.onWorldRemoveDrop = ({ dropId }) => {
-      this.player?.interactionManager?.removeInteractableById(dropId);
-    };
-    networkManager.onWorldSpawnDrop = ({ drop }) => {
-      this.spawnSingleGroundDrop(drop);
-    };
-    networkManager.onWorldSyncLootBox = ({ boxId, boxEmpty }) => {
-      if (boxEmpty) {
-        this.player?.interactionManager?.removeInteractableById(boxId);
+    networkManager.onLoadProgress = ({ loadedCount, totalCount }) => {
+      if (this.loadingSubText) {
+        this.loadingSubText.innerText = `SQUAD: ${loadedCount} / ${totalCount} OPERATIVES READY`;
       }
+    };
+
+    networkManager.onAllPlayersReady = () => this._hideLoadingBarrierUI();
+    networkManager.onRemotePlayerMoved = (data) => this.remotePlayerManager.onNetworkMove(data);
+    networkManager.onRemotePlayerLeft = (socketId) => this.remotePlayerManager.removePlayer(socketId);
+
+    // Native Colyseus Schema Sync for Zombies
+    room.state.zombies.onAdd((zombieState, zombieId) => {
+      if (this.zombieManager?.isClientOnly) {
+        this.zombieManager.syncFromSchema(zombieId, zombieState);
+        
+        zombieState.onChange(() => {
+          this.zombieManager.syncFromSchema(zombieId, zombieState);
+        });
+      }
+    });
+
+    room.state.zombies.onRemove((zombieState, zombieId) => {
+      if (this.zombieManager?.isClientOnly) {
+        this.zombieManager.removeZombie(zombieId);
+      }
+    });
+
+    networkManager.room?.onMessage('z:applyDamage', ({ zombieId, damage }) => {
+      const zombie = this.zombieManager?.zombieMap.get(zombieId);
+      if (zombie) this.zombieManager.takeDamage(zombie, damage);
+    });
+
+    networkManager.onWorldRemoveDrop = (dropId) => this.player?.interactionManager?.removeInteractableById(dropId);
+    networkManager.onWorldSpawnDrop = (drop) => this.spawnSingleGroundDrop(drop);
+    networkManager.onWorldSyncLootBox = ({ boxId, boxEmpty }) => {
+      if (boxEmpty) this.player?.interactionManager?.removeInteractableById(boxId);
     };
   }
 
   async _spawnAuthoritativeWorldLoot(worldState) {
     if (this.isDisposed || !worldState) return;
-    const dropPromises = (worldState.groundDrops || []).map(drop => this.spawnSingleGroundDrop(drop));
-    const boxPromises = (worldState.lootBoxes || []).map(box => this._spawnLootBoxMesh(box));
-    await Promise.all([...dropPromises, ...boxPromises]);
+    if (worldState.groundDrops) {
+      for (const drop of worldState.groundDrops) {
+        if (this.isDisposed) break;
+        await this.spawnSingleGroundDrop(drop);
+      }
+    }
+    if (worldState.lootBoxes) {
+      for (const box of worldState.lootBoxes) {
+        if (this.isDisposed) break;
+        await this._spawnLootBoxMesh(box);
+      }
+    }
   }
 
   async spawnSingleGroundDrop(dropCfg) {
     if (this.isDisposed || !dropCfg) return;
-
     if (!dropCfg.modelPath) {
       const crate = new THREE.Mesh(this.ammoPackGeo, this.ammoPackMat);
       const [x, , z] = dropCfg.position || [0, 0.12, 0];
       crate.position.set(x, 0.12, z);
-      crate.userData = {
-        isInteractable: true,
-        type: 'pickup',
-        dropId: dropCfg.id,
-        itemName: dropCfg.itemName,
-        count: dropCfg.count || 1
-      };
+      crate.userData = { isInteractable: true, type: 'pickup', dropId: dropCfg.id, itemName: dropCfg.itemName, count: dropCfg.count || 1 };
       this.scene.add(crate);
       this.player?.interactionManager?.registerInteractable(crate);
       return;
@@ -183,10 +262,7 @@ export class GameEngine {
 
     return new Promise((resolve) => {
       this.gltfLoader.load(dropCfg.modelPath, (gltf) => {
-        if (this.isDisposed) {
-          resolve();
-          return;
-        }
+        if (this.isDisposed) return resolve();
         const rawScene = gltf.scene;
         shaderPipeline.optimizeModel(rawScene, false, true);
 
@@ -196,29 +272,17 @@ export class GameEngine {
         const maxDim = Math.max(size.x, size.y, size.z);
 
         rawScene.position.set(-center.x, -box.min.y, -center.z);
-
         const itemWrapper = new THREE.Group();
         itemWrapper.add(rawScene);
 
         const desiredSize = dropCfg.targetSize || 0.75;
-        if (maxDim > 0) {
-          itemWrapper.scale.setScalar(desiredSize / maxDim);
-        }
+        if (maxDim > 0) itemWrapper.scale.setScalar(desiredSize / maxDim);
 
         const [x, , z] = dropCfg.position || [0, 0.02, -4];
         itemWrapper.position.set(x, 0.02, z);
 
-        itemWrapper.userData = {
-          isInteractable: true,
-          type: 'pickup',
-          dropId: dropCfg.id,
-          itemName: dropCfg.itemName,
-          count: dropCfg.count || 1
-        };
-
-        itemWrapper.traverse((child) => {
-          if (child.isMesh) child.userData.isInteractable = true;
-        });
+        itemWrapper.userData = { isInteractable: true, type: 'pickup', dropId: dropCfg.id, itemName: dropCfg.itemName, count: dropCfg.count || 1 };
+        itemWrapper.traverse((child) => { if (child.isMesh) child.userData.isInteractable = true; });
 
         this.scene.add(itemWrapper);
         this.player?.interactionManager?.registerInteractable(itemWrapper);
@@ -230,10 +294,7 @@ export class GameEngine {
   async _spawnLootBoxMesh(boxCfg) {
     return new Promise((resolve) => {
       this.gltfLoader.load(boxCfg.modelPath || '/deadzone-assets/lootbox.gltf', (gltf) => {
-        if (this.isDisposed) {
-          resolve();
-          return;
-        }
+        if (this.isDisposed) return resolve();
         const rawScene = gltf.scene;
         shaderPipeline.optimizeModel(rawScene, true, true);
 
@@ -243,27 +304,15 @@ export class GameEngine {
         const maxDim = Math.max(size.x, size.y, size.z);
 
         rawScene.position.set(-center.x, -box.min.y, -center.z);
-
         const wrapper = new THREE.Group();
         wrapper.add(rawScene);
-        if (maxDim > 0) {
-          wrapper.scale.setScalar(1.15 / maxDim);
-        }
+        if (maxDim > 0) wrapper.scale.setScalar(1.15 / maxDim);
 
         const [x, , z] = boxCfg.position || [0, 0.02, -9];
         wrapper.position.set(x, 0.02, z);
 
-        wrapper.userData = {
-          isInteractable: true,
-          type: 'lootbox',
-          boxId: boxCfg.id,
-          itemName: 'Supply Lootbox',
-          items: boxCfg.items || []
-        };
-
-        wrapper.traverse((child) => {
-          if (child.isMesh) child.userData.isInteractable = true;
-        });
+        wrapper.userData = { isInteractable: true, type: 'lootbox', boxId: boxCfg.id, itemName: 'Supply Lootbox', items: boxCfg.items || [] };
+        wrapper.traverse((child) => { if (child.isMesh) child.userData.isInteractable = true; });
 
         this.scene.add(wrapper);
         this.player?.interactionManager?.registerInteractable(wrapper);
@@ -287,23 +336,20 @@ export class GameEngine {
     const delta = Math.min((time - this.prevTime) / 1000, 0.1);
     this.prevTime = time;
 
-    if (this.environmentManager) {
-      this.environmentManager.update(delta, this.camera.position);
+    if (!this.isMatchReady) {
+      this.renderer.render(this.scene, this.camera);
+      return;
     }
 
-    if (this.player) {
-      this.player.update(delta);
-    }
+    if (this.environmentManager) this.environmentManager.update(delta, this.camera.position);
+    if (this.player) this.player.update(delta);
+    if (this.remotePlayerManager) this.remotePlayerManager.update(delta);
 
-    if (this.remotePlayerManager) {
-      this.remotePlayerManager.update(delta);
-    }
+    const isHost = !this.isMultiplayer || networkManager.isHost();
 
-    // Broadcast local player transform to multiplayer room at 20Hz
-    if (this.launchOptions.mode === 'multi' && this.player && this.player.model) {
+    if (this.isMultiplayer && this.player && this.player.model) {
       this._netSyncTimer += delta;
-      if (this._netSyncTimer >= 0.05) {
-        this._netSyncTimer = 0;
+      if (this._netSyncTimer >= 0.066) {
         networkManager.sendPlayerState(
           this.camera.position,
           this.player.model.rotation.y,
@@ -314,11 +360,17 @@ export class GameEngine {
     }
     
     if (this.zombieManager && this.player) {
-      const isPlaying = this.player.controls.isLocked || this.player.isDead || this.player.interactionManager.isLootBoxOpen;
-      if (isPlaying) {
-        this.zombieManager.update(delta, this.player);
+      const remotePositions = [];
+      this.remotePlayerManager.remotePlayers.forEach(rp => remotePositions.push(rp.root.position));
+      this.zombieManager.update(delta, this.player, remotePositions);
+
+      // Serialize Host AI state matching the backend parsing expectations
+      if (this.isMultiplayer && isHost && this._netSyncTimer >= 0.066) {
+        networkManager.room?.send('z:sync', this.zombieManager.serializeForNetwork());
       }
     }
+
+    if (this._netSyncTimer >= 0.066) this._netSyncTimer = 0;
 
     if (this.minimapManager) {
       this._camEuler.setFromQuaternion(this.camera.quaternion, 'YXZ');
@@ -332,14 +384,11 @@ export class GameEngine {
     this.isDisposed = true;
     window.removeEventListener('resize', this._onResize);
     this.renderer.setAnimationLoop(null);
-    
+    if (this.loadingOverlay) this.loadingOverlay.remove();
     if (this.audioManager) this.audioManager.cleanup();
     if (this.minimapManager) this.minimapManager.cleanup();
 
-    this.scene.traverse((obj) => {
-      if (obj.geometry) obj.geometry.dispose();
-    });
-
+    this.scene.traverse((obj) => { if (obj.geometry) obj.geometry.dispose(); });
     this.renderer.dispose();
   }
 }

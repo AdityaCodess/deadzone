@@ -1,5 +1,10 @@
 const API_BASE_URL = '/api';
 
+const DEFAULT_HEADERS = {
+  'Content-Type': 'application/json',
+  'ngrok-skip-browser-warning': 'true' // Bypasses ngrok interstitial warning page on API calls
+};
+
 export class ApiClient {
   static getToken() {
     return localStorage.getItem('deadzone_jwt') || null;
@@ -27,7 +32,7 @@ export class ApiClient {
   static async requestOTP(username, email, password) {
     const res = await fetch(`${API_BASE_URL}/auth/request-otp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ username, email, password })
     });
     const data = await res.json();
@@ -38,7 +43,7 @@ export class ApiClient {
   static async verifyOTP(email, otp) {
     const res = await fetch(`${API_BASE_URL}/auth/verify-otp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ email, otp })
     });
     const data = await res.json();
@@ -50,7 +55,7 @@ export class ApiClient {
   static async googleLogin(payload) {
     const res = await fetch(`${API_BASE_URL}/auth/google`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -60,13 +65,19 @@ export class ApiClient {
   }
 
   static async getGameConfig() {
-    const response = await fetch(`${API_BASE_URL}/config`, { cache: 'no-store' });
+    const response = await fetch(`${API_BASE_URL}/config`, {
+      cache: 'no-store',
+      headers: DEFAULT_HEADERS
+    });
     if (!response.ok) throw new Error(`Failed to fetch game config`);
     return await response.json();
   }
 
   static async getWorldState() {
-    const response = await fetch(`${API_BASE_URL}/world`, { cache: 'no-store' });
+    const response = await fetch(`${API_BASE_URL}/world`, {
+      cache: 'no-store',
+      headers: DEFAULT_HEADERS
+    });
     if (!response.ok) throw new Error(`Failed to fetch world state`);
     return await response.json();
   }
@@ -74,7 +85,7 @@ export class ApiClient {
   static async useConsumable(itemName, currentHealth) {
     const response = await fetch(`${API_BASE_URL}/consumables/use`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ itemName, currentHealth })
     });
     return await response.json();
@@ -83,7 +94,7 @@ export class ApiClient {
   static async pickupGroundDrop(dropId) {
     const response = await fetch(`${API_BASE_URL}/world/pickup`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ dropId })
     });
     return await response.json();
@@ -92,7 +103,7 @@ export class ApiClient {
   static async dropItemOnGround(itemName, count, position) {
     const response = await fetch(`${API_BASE_URL}/world/drop`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ itemName, count, position })
     });
     return await response.json();
@@ -101,7 +112,7 @@ export class ApiClient {
   static async claimLootBoxItem(boxId, slotId) {
     const response = await fetch(`${API_BASE_URL}/world/lootbox/claim`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ boxId, slotId })
     });
     return await response.json();
@@ -110,7 +121,7 @@ export class ApiClient {
   static async requestZombieLoot(position) {
     const response = await fetch(`${API_BASE_URL}/world/zombie-drop`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: DEFAULT_HEADERS,
       body: JSON.stringify({ position })
     });
     return await response.json();
@@ -120,7 +131,7 @@ export class ApiClient {
     try {
       await fetch(`${API_BASE_URL}/player/equip`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: DEFAULT_HEADERS,
         body: JSON.stringify({ playerId: 'local_player', itemName })
       });
     } catch (e) {}
