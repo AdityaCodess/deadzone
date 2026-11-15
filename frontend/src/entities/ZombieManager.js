@@ -16,6 +16,7 @@ export class ZombieManager {
 
     this.zombies = [];
     this.zombieMap = new Map();
+    this.pendingSpawns = new Set(); // Tracks models currently loading to prevent clone spam!
     this.mixers = [];
     this._targetPos = new THREE.Vector3();
     this._zombieBox = new THREE.Box3();
@@ -145,7 +146,14 @@ export class ZombieManager {
     let zombie = this.zombieMap.get(zombieId);
 
     if (!zombie) {
-      this.spawnZombie(new THREE.Vector3(zState.x, 0, zState.z), zombieId);
+      // Async loading lock: if we are already fetching this 3D model, DO NOT spawn a duplicate!
+      if (this.pendingSpawns.has(zombieId)) return;
+      
+      this.pendingSpawns.add(zombieId);
+      
+      this.spawnZombie(new THREE.Vector3(zState.x, 0, zState.z), zombieId).then(() => {
+        this.pendingSpawns.delete(zombieId); // Unlock once the model finishes loading
+      });
       return;
     }
 
@@ -173,7 +181,6 @@ export class ZombieManager {
     if (index !== -1) this._destroyZombieCorpse(index);
   }
 
-  // Host serializes objects properly into an object array for the backend to ingest
   serializeForNetwork() {
     const list = [];
     for (let i = 0; i < this.zombies.length; i++) {
@@ -236,6 +243,7 @@ export class ZombieManager {
       return;
     }
 
+    // Host AI Logic
     for (let i = this.zombies.length - 1; i >= 0; i--) {
       const zombie = this.zombies[i];
       zombie.userData.mixer.update(delta);
@@ -250,14 +258,18 @@ export class ZombieManager {
       zombie.position.y = this.groundYOffset;
       const actions = zombie.userData.actions;
 
-      let nearestTarget = this.playerCamera.position;
+      // 1. Scan Host AND all remote squad members to find the absolute closest target
+      let nearestTarget = this.playerCamera.position; 
       let minDistance = Math.hypot(nearestTarget.x - zombie.position.x, nearestTarget.z - zombie.position.z);
+      let targetIsHost = true;
 
       for (const pPos of allPlayersPos) {
+        if (!pPos) continue;
         const d = Math.hypot(pPos.x - zombie.position.x, pPos.z - zombie.position.z);
         if (d < minDistance) {
           minDistance = d;
           nearestTarget = pPos;
+          targetIsHost = false; 
         }
       }
 
@@ -299,8 +311,11 @@ export class ZombieManager {
         }
 
         if (minDistance <= attackRange + 0.3 && now - zombie.userData.lastAttackTime > config.attackCooldown) {
-          if (nearestTarget === this.playerCamera.position && player && !player.isDead) {
+          // 2. Only damage the Host locally if the Host is the target
+          if (targetIsHost && player && !player.isDead) {
             player.takeDamage(config.damage);
+          } else if (!targetIsHost) {
+            // (Remote player damage will be synced here later!)
           }
           zombie.userData.lastAttackTime = now;
           zombie.userData.attackWindupUntil = now + 650;

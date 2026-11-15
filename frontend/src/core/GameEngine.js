@@ -34,6 +34,7 @@ export class GameEngine {
 
     this.prevTime = performance.now();
     this._netSyncTimer = 0;
+    this._bgInterval = null;
     
     this.player = null;
     this.zombieManager = null;
@@ -125,7 +126,7 @@ export class GameEngine {
           this.spawnSingleGroundDrop(dropData);
           if (this.isMultiplayer) networkManager.notifyItemDropped(dropData);
         },
-        this.launchOptions // Pass launchOptions to Player for Mode checks
+        this.launchOptions
       );
 
       if (this.isMultiplayer && this.launchOptions.room) {
@@ -203,26 +204,47 @@ export class GameEngine {
     networkManager.onRemotePlayerMoved = (data) => this.remotePlayerManager.onNetworkMove(data);
     networkManager.onRemotePlayerLeft = (socketId) => this.remotePlayerManager.removePlayer(socketId);
 
-    // Native Colyseus Schema Sync for Zombies
-    room.state.zombies.onAdd((zombieState, zombieId) => {
-      if (this.zombieManager?.isClientOnly) {
-        this.zombieManager.syncFromSchema(zombieId, zombieState);
+    this.knownZombies = new Set();
+    this.zombieHashes = new Map(); 
+    
+    room.onStateChange((state) => {
+      if (!state || !state.zombies || !this.zombieManager?.isClientOnly) return;
+      
+      state.zombies.forEach((zombieState, zombieId) => {
+        const currentHash = `${zombieState.x}|${zombieState.y}|${zombieState.z}|${zombieState.rotY}|${zombieState.state}|${zombieState.health}`;
         
-        zombieState.onChange(() => {
+        if (!this.knownZombies.has(zombieId)) {
+          this.knownZombies.add(zombieId);
+          this.zombieHashes.set(zombieId, currentHash);
           this.zombieManager.syncFromSchema(zombieId, zombieState);
-        });
-      }
-    });
+        } else {
+          const lastHash = this.zombieHashes.get(zombieId);
+          if (lastHash !== currentHash) {
+            this.zombieHashes.set(zombieId, currentHash);
+            this.zombieManager.syncFromSchema(zombieId, zombieState);
+          }
+        }
+      });
 
-    room.state.zombies.onRemove((zombieState, zombieId) => {
-      if (this.zombieManager?.isClientOnly) {
-        this.zombieManager.removeZombie(zombieId);
-      }
+      this.knownZombies.forEach((zombieId) => {
+        if (!state.zombies.has(zombieId)) {
+          this.knownZombies.delete(zombieId);
+          this.zombieHashes.delete(zombieId); 
+          this.zombieManager.removeZombie(zombieId);
+        }
+      });
     });
 
     networkManager.room?.onMessage('z:applyDamage', ({ zombieId, damage }) => {
       const zombie = this.zombieManager?.zombieMap.get(zombieId);
       if (zombie) this.zombieManager.takeDamage(zombie, damage);
+    });
+
+    // FIX: Listen for damage directed at THIS client from the Host
+    networkManager.room?.onMessage('p:applyDamage', ({ targetId, damage }) => {
+      if (targetId === networkManager.room?.sessionId && this.player && !this.player.isDead) {
+        this.player.takeDamage(damage);
+      }
     });
 
     networkManager.onWorldRemoveDrop = (dropId) => this.player?.interactionManager?.removeInteractableById(dropId);
@@ -329,15 +351,43 @@ export class GameEngine {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
     };
     window.addEventListener('resize', this._onResize);
+
+    const workerCode = `
+      let timer = null;
+      self.onmessage = function(e) {
+        if (e.data === 'start') {
+          timer = setInterval(() => self.postMessage('tick'), 33);
+        } else if (e.data === 'stop') {
+          if (timer) clearInterval(timer);
+        }
+      };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    this.bgWorker = new Worker(URL.createObjectURL(blob));
+    
+    this.bgWorker.onmessage = () => {
+      this._gameLoop(performance.now(), true);
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if (this.isDisposed) return;
+      
+      if (document.hidden) {
+        this.bgWorker.postMessage('start');
+      } else {
+        this.bgWorker.postMessage('stop');
+        this.prevTime = performance.now();
+      }
+    });
   }
 
-  _gameLoop(time) {
+  _gameLoop(time, isBackground = false) {
     if (this.isDisposed) return;
     const delta = Math.min((time - this.prevTime) / 1000, 0.1);
     this.prevTime = time;
 
     if (!this.isMatchReady) {
-      this.renderer.render(this.scene, this.camera);
+      if (!isBackground) this.renderer.render(this.scene, this.camera);
       return;
     }
 
@@ -360,11 +410,14 @@ export class GameEngine {
     }
     
     if (this.zombieManager && this.player) {
-      const remotePositions = [];
-      this.remotePlayerManager.remotePlayers.forEach(rp => remotePositions.push(rp.root.position));
-      this.zombieManager.update(delta, this.player, remotePositions);
+      // FIX: We now pack the socketId AND the position so the Zombie AI knows WHO to bite
+      const remotePlayersData = [];
+      this.remotePlayerManager.remotePlayers.forEach((rp, socketId) => {
+        remotePlayersData.push({ socketId, position: rp.root.position });
+      });
+      
+      this.zombieManager.update(delta, this.player, remotePlayersData);
 
-      // Serialize Host AI state matching the backend parsing expectations
       if (this.isMultiplayer && isHost && this._netSyncTimer >= 0.066) {
         networkManager.room?.send('z:sync', this.zombieManager.serializeForNetwork());
       }
@@ -377,12 +430,17 @@ export class GameEngine {
       this.minimapManager.update(this.camera.position, this._camEuler.y);
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (!isBackground) {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 
   cleanup() {
     this.isDisposed = true;
     window.removeEventListener('resize', this._onResize);
+    
+    if (this.bgWorker) this.bgWorker.terminate(); 
+    
     this.renderer.setAnimationLoop(null);
     if (this.loadingOverlay) this.loadingOverlay.remove();
     if (this.audioManager) this.audioManager.cleanup();
