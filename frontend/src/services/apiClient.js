@@ -1,4 +1,5 @@
 const API_BASE_URL = '/api';
+import { Client } from '@colyseus/sdk';
 
 const DEFAULT_HEADERS = {
   'Content-Type': 'application/json',

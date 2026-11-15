@@ -1,4 +1,4 @@
-import * as Colyseus from 'colyseus.js';
+import { Client } from '@colyseus/sdk';
 import { ApiClient } from '../services/apiClient.js';
 
 const BACKEND_ORIGIN = import.meta.env.VITE_BACKEND_URL || window.location.origin;
@@ -10,8 +10,12 @@ export class NetworkManager {
     const wsUrl = import.meta.env.VITE_BACKEND_URL 
       ? import.meta.env.VITE_BACKEND_URL.replace(/^http/, 'ws')
       : `${protocol}://${hostname}:3001`;
-    this.client = new Colyseus.Client(wsUrl);
+      
+    this.client = new Client(wsUrl);
     this.room = null;
+    
+    // We will track the players manually to completely bypass the Vite .onAdd crash!
+    this.knownPlayers = new Set();
 
     this.onLobbyUpdated = null;
     this.onMatchStart = null;
@@ -42,14 +46,24 @@ export class NetworkManager {
   }
 
   _bindRoomEvents() {
-    this.room.state.players.onAdd((player, sessionId) => {
-      // Trigger lobby update when someone joins
-      if (this.onLobbyUpdated) this.onLobbyUpdated(this.room);
+    // THE NUCLEAR FIX: Every time the server ticks, we natively read the raw Map.
+    // This requires ZERO Colyseus Schema decorators and is 100% Vite-proof.
+    this.room.onStateChange((state) => {
+      if (!state || !state.players) return;
 
-      player.onChange(() => {
+      // 1. Detect New Players & Update Movements natively
+      state.players.forEach((player, sessionId) => {
+        
+        // Emulate .onAdd
+        if (!this.knownPlayers.has(sessionId)) {
+          this.knownPlayers.add(sessionId);
+          if (this.onLobbyUpdated) this.onLobbyUpdated(this.room);
+        }
+
+        // Emulate .onChange
         if (sessionId !== this.room.sessionId && this.onRemotePlayerMoved) {
           this.onRemotePlayerMoved({
-            socketId: sessionId, // Legacy map for engine compatibility
+            socketId: sessionId, 
             position: [player.x, player.y, player.z],
             rotationY: player.rotY,
             action: player.action,
@@ -57,11 +71,15 @@ export class NetworkManager {
           });
         }
       });
-    });
 
-    this.room.state.players.onRemove((player, sessionId) => {
-      if (this.onLobbyUpdated) this.onLobbyUpdated(this.room);
-      if (this.onRemotePlayerLeft) this.onRemotePlayerLeft(sessionId);
+      // 2. Detect Removed Players natively
+      this.knownPlayers.forEach((sessionId) => {
+        if (!state.players.has(sessionId)) {
+          this.knownPlayers.delete(sessionId);
+          if (this.onLobbyUpdated) this.onLobbyUpdated(this.room);
+          if (this.onRemotePlayerLeft) this.onRemotePlayerLeft(sessionId);
+        }
+      });
     });
 
     this.room.onMessage("match:start", (payload) => {
@@ -76,7 +94,6 @@ export class NetworkManager {
       if (this.onAllPlayersReady) this.onAllPlayersReady();
     });
 
-    // Custom Gameplay Messages
     this.room.onMessage("player:shotFX", (fxData) => {
       if (this.onRemoteShotFX) this.onRemoteShotFX(fxData);
     });
@@ -92,7 +109,7 @@ export class NetworkManager {
   }
 
   isHost() {
-    const me = this.room?.state.players.get(this.room.sessionId);
+    const me = this.room?.state?.players?.get(this.room.sessionId);
     return me ? me.isHost : false;
   }
 
@@ -152,6 +169,7 @@ export class NetworkManager {
     if (this.room) {
       this.room.leave();
       this.room = null;
+      this.knownPlayers.clear();
     }
   }
 }

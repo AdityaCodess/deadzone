@@ -24,27 +24,56 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
 
-// We absolutely need this to read the incoming character & guestName payloads
 app.use(express.json()); 
 
-// 2. THE LOOP FIX: Correct Matchmaking API Methods
-app.post('/matchmake/create/:roomName', async (req, res) => {
+// 2. THE LOOP FIX: v0.18 Compatible Matchmaking Router
+app.post('/matchmake/:method/:roomName', async (req, res) => {
   try {
-    // The frontend calls "create", but the backend API specifically requires 
-    // creating the room FIRST, and then explicitly reserving a seat.
-    const room = await matchMaker.createRoom(req.params.roomName, req.body || {});
+    const { method, roomName } = req.params;
+    console.log(`[MatchMake] Frontend requested ${method} for room: ${roomName}`);
+    
+    const targetRoom = "deadzone"; 
+    
+    let room;
+    if (method === 'joinById') {
+      room = await matchMaker.getRoomById(roomName);
+    } else {
+      room = await matchMaker.createRoom(targetRoom, req.body || {});
+    }
+
+    // 1. Get the FULL, unmodified reservation object (contains hidden security tokens!)
     const reservation = await matchMaker.reserveSeatFor(room, req.body || {});
-    res.json(reservation);
+    
+    // 2. Safely patch ONLY the name property to prevent the frontend alert box crash
+    if (reservation.room) {
+      reservation.room.name = targetRoom;
+    }
+    
+    console.log(`[MatchMake] Success! Sending v0.18 payload to frontend.`);
+    
+    // 3. Send the ENTIRE object, keeping all Colyseus internal tokens intact!
+    return res.json(reservation);
+
   } catch (e) {
-    console.error("[MatchMake Create Error]:", e.message);
-    res.status(400).json({ error: e.message });
+    console.error(`[MatchMake FATAL ERROR]:`, e.stack);
+    return res.status(500).json({ 
+      error: "Backend failed to create room. Check the Node terminal." 
+    });
   }
 });
 
 app.post('/matchmake/joinOrCreate/:roomName', async (req, res) => {
   try {
     const reservation = await matchMaker.joinOrCreate(req.params.roomName, req.body || {});
-    res.json(reservation);
+    
+    res.json({
+      room: {
+        roomId: reservation.room?.roomId || "",
+        name: req.params.roomName,
+        processId: reservation.room?.processId || ""
+      },
+      sessionId: reservation.sessionId
+    });
   } catch (e) {
     console.error("[MatchMake JoinOrCreate Error]:", e.message);
     res.status(400).json({ error: e.message });
@@ -54,13 +83,20 @@ app.post('/matchmake/joinOrCreate/:roomName', async (req, res) => {
 app.post('/matchmake/joinById/:roomId', async (req, res) => {
   try {
     const reservation = await matchMaker.joinById(req.params.roomId, req.body || {});
-    res.json(reservation);
+    
+    res.json({
+      room: {
+        roomId: reservation.room?.roomId || req.params.roomId,
+        name: "deadzone", 
+        processId: reservation.room?.processId || ""
+      },
+      sessionId: reservation.sessionId
+    });
   } catch (e) {
     console.error("[MatchMake JoinById Error]:", e.message);
     res.status(400).json({ error: e.message });
   }
 });
-
 // 3. Connect to MongoDB Atlas
 if (process.env.MONGO_URI) {
   mongoose.connect(process.env.MONGO_URI)
