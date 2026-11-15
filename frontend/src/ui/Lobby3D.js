@@ -353,9 +353,13 @@ export class Lobby3D {
 
     if (this.currentRoom) {
       this.rightPanel.style.display = 'flex';
+      
+      // Check both Colyseus ID properties to guarantee the code displays
+      const displayCode = this.currentRoom.id || this.currentRoom.roomId || '----';
+      
       this.rightPanel.innerHTML = `
         <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px;">
-          <span style="color: #ffaa44; font-weight: bold; font-size: 1.1rem; letter-spacing: 2px;">CODE: ${this.currentRoom.id || this.currentRoom.code || '----'}</span>
+          <span style="color: #ffaa44; font-weight: bold; font-size: 1.1rem; letter-spacing: 2px;">CODE: ${displayCode}</span>
           <span style="color: #33ff66; background: rgba(51, 255, 102, 0.1); padding: 4px 8px; border-radius: 4px;">${this.currentRoom.state?.players?.size || 1} / 4</span>
         </div>
       `;
